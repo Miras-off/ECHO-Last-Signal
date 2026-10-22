@@ -325,30 +325,30 @@ class Game:
     def draw_fog(self,camera):
         w=self.world
         overlay=pygame.Surface((VW,VH),pygame.SRCALPHA)
-        overlay.fill((3,8,15,238))
-        px,py=w.player.x,w.player.y
-        radius=6.8
-        sx=max(0,int(px-radius-1));ex=min(w.width,int(px+radius+2))
-        sy=max(0,int(py-radius-1));ey=min(w.height,int(py+radius+2))
-        for gy in range(sy,ey):
-            for gx in range(sx,ex):
-                cx,cy=gx+0.5,gy+0.5
-                if distance((px,py),(cx,cy))<=radius and w.ray_clear(px,py,cx,cy):
-                    rx=int(gx*T-camera[0]);ry=int(gy*T-camera[1])
-                    pygame.draw.rect(overlay,(0,0,0,0),(rx,ry,T,T))
-        psx,psy=self.px(px,py,camera)
-        pygame.draw.circle(overlay,(0,0,0,0),(psx,psy),48)
+        overlay.fill((3,8,15,255))
+        for gx,gy in w.room_view_tiles():
+            rx=int(gx*T-camera[0]);ry=int(gy*T-camera[1])
+            pygame.draw.rect(overlay,(0,0,0,0),(rx,ry,T,T))
         self.window.blit(overlay,(0,0))
 
     def draw_cones(self,camera):
         w=self.world
+        room=w.room_view_tiles()
         layer=pygame.Surface((VW,VH),pygame.SRCALPHA)
-        def sector(sx,sy,angle,radius,width,rgb,opacity,samples=80,outline=None):
+        def cast_sector(sx,sy,angle,radius,width,rgb,opacity,samples=96,outline=None):
             origin=self.px(sx,sy,camera)
             pts=[origin]
             for i in range(samples+1):
                 theta=math.radians(angle-width/2+i*width/max(1,samples))
-                pts.append(self.px(sx+math.cos(theta)*radius,sy+math.sin(theta)*radius,camera))
+                stop=radius
+                steps=max(6,int(radius*18))
+                for n in range(1,steps+1):
+                    dist=radius*n/steps
+                    x=sx+math.cos(theta)*dist;y=sy+math.sin(theta)*dist
+                    if w.collides(x,y,.04) or (int(x),int(y)) not in room:
+                        stop=max(0,dist-radius/steps)
+                        break
+                pts.append(self.px(sx+math.cos(theta)*stop,sy+math.sin(theta)*stop,camera))
             if len(pts)>2:
                 pygame.draw.polygon(layer,(*rgb,opacity),pts)
                 if outline and width<360:
@@ -356,11 +356,11 @@ class Game:
                     pygame.draw.aaline(layer,(*outline,210),origin,pts[1])
                     pygame.draw.aaline(layer,(*outline,210),origin,pts[-1])
         for o in w.objects:
-            if o['type']=='camera' and w.time>=w.cam_disable_until:
+            if o['type']=='camera' and w.time>=w.cam_disable_until and (int(o['x']),int(o['y'])) in room:
                 angle=o.get('angle',0)+math.sin(w.time*.85+o['x'])*o.get('sweep',50)
-                sector(o['x'],o['y'],angle,o.get('range',7),64,(242,87,108),46,samples=96,outline=(255,157,170))
+                cast_sector(o['x'],o['y'],angle,o.get('range',7),64,(242,87,108),46,samples=110,outline=(255,157,170))
         for drone in w.drones:
-            if w.time>=drone.stunned:
+            if w.time>=drone.stunned and (int(drone.x),int(drone.y)) in room:
                 pos=self.px(drone.x,drone.y,camera)
                 pygame.draw.circle(layer,(245,197,95,18),pos,int(min(3.7,drone.vision)*T))
                 pygame.draw.circle(layer,(245,197,95,70),pos,int(min(3.7,drone.vision)*T),1)
@@ -368,6 +368,7 @@ class Game:
 
     def draw_entities(self,camera):
         w=self.world
+        room=w.room_view_tiles()
         self.window.set_clip(pygame.Rect(0,0,VW,VH))
         mouse=pygame.mouse.get_pos()
         self.hover_object=None
@@ -383,6 +384,7 @@ class Game:
         }
         for o in w.objects:
             if o['taken'] or o['type']=='spawn':continue
+            if (int(o['x']),int(o['y'])) not in room:continue
             typ=o['type'];sx,sy=self.px(o['x'],o['y'],camera)
             if not (-50<sx<VW+50 and -50<sy<VH+50):continue
             if typ=='gate':
@@ -397,7 +399,7 @@ class Game:
             asset=names.get(typ)
             if not asset:continue
             size=42 if typ not in ('camera','turret') else 46
-            pulse=int((math.sin(w.time*3+o['id'])*0.5+0.5)*3)
+            pulse=int((math.sin(w.time*3+float(o['x'])+float(o['y']))*0.5+0.5)*3)
             self.image(asset,sx,sy,size)
             obj_rect=pygame.Rect(int(sx-size/2),int(sy-size/2),size,size)
             hover=obj_rect.collidepoint(mouse)
@@ -423,6 +425,7 @@ class Game:
                 self.rect((bx,by,tw+10,14),'panel','border',5)
                 self.text(lab,sx,by+2,10,key if key else 'muted',True,center=True)
         for drone in w.drones:
+            if (int(drone.x),int(drone.y)) not in room:continue
             sx,sy=self.px(drone.x,drone.y,camera)
             self.image('drone',sx,sy,48)
             pygame.draw.circle(self.window,color('gold'),(sx,sy),26,1)
@@ -443,7 +446,7 @@ class Game:
         self.image(sprite,sx,sy,47,52,flip=p.facing=='left')
         nx,ny=sx-45,sy-43+math.sin(w.time*3)*4
         self.image('nova',nx,ny,32)
-        if w.lure_pos and w.time<w.lure_until:
+        if w.lure_pos and w.time<w.lure_until and (int(w.lure_pos[0]),int(w.lure_pos[1])) in room:
             lx,ly=self.px(*w.lure_pos,camera);pygame.draw.circle(self.window,color('gold'),(lx,ly),12,2)
         n=w.nearby(r=1.4)
         if n:
@@ -520,24 +523,20 @@ class Game:
 
     def mini_map(self,x,y,scale=7):
         w=self.world
+        room=w.room_view_tiles()
         self.rect((x-13,y-35,w.width*scale+26,w.height*scale+56),'panel','border',10)
         self.text('КАРТА СЕКТОРА • [M]',x,y-24,15,'accent',True)
-        px,py=w.player.x,w.player.y
-        radius=7.2
         for yy in range(w.height):
             for xx in range(w.width):
-                cx,cy=xx+0.5,yy+0.5
-                visible=distance((px,py),(cx,cy))<=radius and w.ray_clear(px,py,cx,cy)
-                if not visible:
+                tile=w.tiles[yy*w.width+xx]
+                if (xx,yy) not in room:
                     shade=(11,20,29)
                 else:
-                    tile=w.tiles[yy*w.width+xx]
                     shade=(68,86,104) if tile in(2,5) else (31,54,72)
                 pygame.draw.rect(self.window,shade,(x+xx*scale,y+yy*scale,scale,scale))
         for o in w.objects:
             if o.get('taken'):continue
-            visible=distance((px,py),(o['x'],o['y']))<=radius and w.ray_clear(px,py,o['x'],o['y'])
-            if not visible:continue
+            if (int(o['x']),int(o['y'])) not in room:continue
             sx=x+int(o['x']*scale);sy=y+int(o['y']*scale)
             shade=(84,215,217) if o['type']=='main_terminal' else (240,208,114) if o['type']=='core' else (119,230,160) if o['type']=='exit' else None
             if o['type']=='gate' and not w.gates[o['gate_id']]:shade=(239,114,125)

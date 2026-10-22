@@ -97,6 +97,55 @@ class World:
                 for gate,pos in self.gate_positions.items():
                     if not self.gates[gate] and (gx,gy)==pos:return True
         return False
+    def is_walkable_tile(self,gx,gy):
+        if gx<0 or gx>=self.width or gy<0 or gy>=self.height:return False
+        if self.tiles[gy*self.width+gx] in (2,5):return False
+        for gate,pos in self.gate_positions.items():
+            if not self.gates[gate] and (gx,gy)==pos:return False
+        return True
+
+    def is_portal_tile(self,gx,gy):
+        if not self.is_walkable_tile(gx,gy):return False
+        left=not self.is_walkable_tile(gx-1,gy)
+        right=not self.is_walkable_tile(gx+1,gy)
+        up=not self.is_walkable_tile(gx,gy-1)
+        down=not self.is_walkable_tile(gx,gy+1)
+        horiz_narrow=left and right and not (up and down)
+        vert_narrow=up and down and not (left and right)
+        return horiz_narrow or vert_narrow
+
+    def room_tiles(self,x=None,y=None):
+        # A narrow 1-tile doorway separates rooms. While the player is exactly
+        # on the threshold, keep displaying the previously entered room.
+        active=x is None and y is None
+        sx=int(self.player.x if x is None else x)
+        sy=int(self.player.y if y is None else y)
+        if not self.is_walkable_tile(sx,sy):return {(sx,sy)}
+        if self.is_portal_tile(sx,sy) and active and getattr(self,'_last_room_tiles',None):
+            return self._last_room_tiles | {(sx,sy)}
+        start=(sx,sy);q=deque([start]);seen={start}
+        while q:
+            cx,cy=q.popleft()
+            if (cx,cy)!=start and self.is_portal_tile(cx,cy):
+                continue
+            for nx,ny in ((cx+1,cy),(cx-1,cy),(cx,cy+1),(cx,cy-1)):
+                if (nx,ny) not in seen and self.is_walkable_tile(nx,ny):
+                    seen.add((nx,ny));q.append((nx,ny))
+        if active and not self.is_portal_tile(sx,sy):
+            self._last_room_tiles=seen
+        return seen
+
+    def room_view_tiles(self):
+        # The room itself is fully visible, together with its enclosing
+        # walls/closed gates. Adjacent rooms remain completely hidden.
+        room=self.room_tiles()
+        view=set(room)
+        for cx,cy in room:
+            for nx,ny in ((cx+1,cy),(cx-1,cy),(cx,cy+1),(cx,cy-1)):
+                if 0<=nx<self.width and 0<=ny<self.height and not self.is_walkable_tile(nx,ny):
+                    view.add((nx,ny))
+        return view
+
     def ray_clear(self,ax,ay,bx,by):
         d=math.hypot(bx-ax,by-ay)
         steps=max(1,math.ceil(d*8))
