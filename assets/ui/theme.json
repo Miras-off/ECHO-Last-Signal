@@ -21,5 +21,9 @@
     "bad": "#ff5268",
     "gold": "#e9b95f"
   },
-  "sound_enabled": true
+  "sound_enabled": true,
+  "music_enabled": true,
+  "music_volume": 50,
+  "sfx_volume": 72,
+  "voice_volume": 70
 }

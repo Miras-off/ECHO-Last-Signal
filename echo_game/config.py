@@ -7,6 +7,10 @@ DEFAULT={
  'ambient_enabled':False,
  'fog_enabled':True,
  'master_volume':70,
+ 'music_enabled':True,
+ 'music_volume':50,
+ 'sfx_volume':72,
+ 'voice_volume':70,
  'ui_scale':100,
  'palette':{
   'background':'#030910',

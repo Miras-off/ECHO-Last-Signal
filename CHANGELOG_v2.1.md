@@ -50,3 +50,14 @@
 - tiny L-shaped connector pockets retain the previous room view, preventing a one-step fog collapse;
 - `scripts/render_combat_preview.py` renders deterministic QA frames for all three effects and the doorway warning view;
 - `scripts/verify_combat_animation.py` compares four phases of every combat animation and fails on static output.
+
+
+## v2.1.1 — Cinematic audio overhaul
+
+- 7 original OGG looping tracks: 4 scene themes, suspense, chase and non-tonal ship ventilation.
+- New distinctive alerts for camera pre-lock/full-lock, drone pursuit, combat attacks and turret firing.
+- One-shot sounds for terminal, puzzle correct/wrong answers, ship gates, power core, pickups and Nova abilities.
+- Per-track crossfading and music intensity layering without repeatedly restarting ambient.
+- Sound priority/cooldowns to avoid ear-piercing overlap.
+- Separate saved master/music/SFX/Nova-signal volumes; music and ambience toggles; menu-return fix.
+- Original, editable audio samples and reproducible generator `scripts/generate_soundtrack.py`; additional audio tests.

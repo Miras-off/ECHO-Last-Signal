@@ -10,6 +10,7 @@ from .storage import Storage
 from .commands import ACTIONS
 from .config import read_settings, save_settings
 from .adaptive import AdaptiveDirector
+from .audio import AudioDirector
 
 CFG=read_settings()
 W,H=int(CFG['screen_width']),int(CFG['screen_height'])
@@ -23,6 +24,7 @@ def color(key):return pygame.Color(PAL.get(key,key))
 class Game:
     def __init__(self):
         global W,H,VW,VH,PAL
+        pygame.mixer.pre_init(24000,-16,2,512)
         pygame.init()
         try:pygame.display.set_caption('ECHO: Последний сигнал • Атлас-9')
         except Exception:pass
@@ -36,7 +38,8 @@ class Game:
             self.window=pygame.display.set_mode((W,H))
         self.clock=pygame.time.Clock();self.running=True
         self.fullscreen=bool(flags & pygame.FULLSCREEN)
-        self.sounds={};self.sound_log_counter=0;self.last_alert_level=0
+        self.sound_log_counter=0;self.last_alert_level=0;self.last_combat_audio_id=0
+        self.camera_warning_ids=set();self.previous_drone_states={};self.turret_armed=False
         self.fonts={}
         self.glow_cache={}
         self.ring_cache={}
@@ -56,24 +59,10 @@ class Game:
         self.load_sounds()
         self.apply_audio_settings()
     def load_sounds(self):
-        try:
-            if pygame.mixer.get_init() is None:pygame.mixer.init()
-            for wav in (ROOT/"assets"/"audio").glob("*.wav"):
-                self.sounds[wav.stem]=pygame.mixer.Sound(str(wav))
-        except pygame.error:pass  # Audio devices are optional; the game remains playable
+        self.audio=AudioDirector(ROOT/'assets'/'audio',CFG)
 
     def apply_audio_settings(self):
-        master=max(0,min(100,int(CFG.get('master_volume',70))))/100
-        for key,snd in self.sounds.items():
-            base=.10 if key=='ambient' else .34
-            snd.set_volume(base*master if CFG.get('sound_enabled',True) else 0)
-        try:
-            if 'ambient' in self.sounds:
-                self.sounds['ambient'].stop()
-                if CFG.get('sound_enabled',True) and CFG.get('ambient_enabled',False):
-                    self.sounds['ambient'].play(-1)
-        except pygame.error:
-            pass
+        self.audio.configure(CFG)
 
     def persist_settings(self):
         global CFG,PAL
@@ -81,10 +70,9 @@ class Game:
         PAL=CFG['palette']
         self.apply_audio_settings()
 
-    def sound(self,key):
-        try:
-            if CFG.get("sound_enabled",True) and key in self.sounds:self.sounds[key].play()
-        except pygame.error:pass
+    def sound(self,key,**kwargs):
+        return self.audio.play(key,**kwargs)
+
     def toggle_fullscreen(self):
         global W,H,VW,VH
         self.fullscreen=not self.fullscreen
@@ -220,6 +208,7 @@ class Game:
         self.director=AdaptiveDirector(ROOT/'save_data'/'adaptive_qtable.json')
         self.world.ai_factor=self.director.current_factor
         self.sound_log_counter=self.world.log_counter;self.last_alert_level=0
+        self.last_combat_audio_id=0;self.camera_warning_ids=set();self.previous_drone_states={};self.turret_armed=False
         if not challenge:self.save()
     def save(self):
         if self.world and not self.world.challenge:
@@ -229,6 +218,7 @@ class Game:
             w=self.world
             self.world=World(w.level,abilities=w.abilities,inventory={'medkit':1,'battery':1,'keycard':0,'lure':0},challenge=w.challenge)
             self.sound_log_counter=self.world.log_counter;self.last_alert_level=0
+            self.last_combat_audio_id=0;self.camera_warning_ids=set();self.previous_drone_states={};self.turret_armed=False
             self.mode='play';self.action_open=False;self.puzzle_open=None;self.room_key=None
     def next_level(self):
         w=self.world
@@ -239,12 +229,12 @@ class Game:
             self.mode='menu';return
         if w.level<3:
             self.world=World(w.level+1,abilities=w.abilities,stats=w.stats,inventory={'medkit':max(1,w.inventory['medkit']),'battery':max(1,w.inventory['battery']),'keycard':0,'lure':w.inventory['lure']})
-            self.mode='play';self.sound_log_counter=self.world.log_counter;self.last_alert_level=0;self.puzzle_open=None;self.room_key=None;self.save()
+            self.mode='play';self.sound_log_counter=self.world.log_counter;self.last_alert_level=0;self.last_combat_audio_id=0;self.camera_warning_ids=set();self.previous_drone_states={};self.turret_armed=False;self.puzzle_open=None;self.room_key=None;self.save()
         else:
             self.storage.clear();self.mode='credits'
     def handle_click(self,pos):
         for rect,cb in reversed(self.buttons):
-            if rect.collidepoint(pos):cb();break
+            if rect.collidepoint(pos):self.sound('ui_click');cb();break
     def keyboard_action(self,key):
         mapping={pygame.K_1:'scan',pygame.K_2:'connect',pygame.K_3:'hack',pygame.K_4:'open',pygame.K_5:'shield',pygame.K_6:'pulse',pygame.K_7:'help',pygame.K_8:'off_red',pygame.K_9:'on_yellow',pygame.K_0:'off_blue',pygame.K_MINUS:'on_red',pygame.K_EQUALS:'off_yellow',pygame.K_BACKSPACE:'on_blue'}
         return mapping.get(key)
@@ -258,10 +248,11 @@ class Game:
             if self.action_open:self.action_open=False;return
             if self.map_open:self.map_open=False;return
             if self.notes_open:self.notes_open=False;return
-            if self.puzzle_open:self.puzzle_open=None;return
-            if self.mode=='play':self.mode='pause';self.save()
-            elif self.mode=='pause':self.mode='play'
-            else:self.mode='menu'
+            if self.puzzle_open:self.puzzle_open=None;self.sound('ui_back');return
+            if self.mode=='play':self.mode='pause';self.sound('ui_back');self.save()
+            elif self.mode=='pause':self.mode='play';self.sound('ui_click')
+            elif self.mode=='settings':self.mode=getattr(self,'settings_return_mode','menu');self.sound('ui_back')
+            else:self.mode='menu';self.sound('ui_back')
             return
         if self.mode=='play':
             w=self.world
@@ -272,12 +263,13 @@ class Game:
             if evt.key in (pygame.K_e,pygame.K_SPACE):
                 obj=w.nearby('puzzle',r=1.9)
                 if obj and obj.get('puzzle_id') not in w.solved_puzzles:
-                    self.puzzle_open=obj['puzzle_id'];return
+                    self.puzzle_open=obj['puzzle_id'];self.sound('terminal_open');return
                 w.interact();return
             if evt.key==pygame.K_TAB:self.action_open=not self.action_open;return
             if evt.key==pygame.K_m:self.map_open=not self.map_open;return
             if evt.key==pygame.K_n:self.notes_open=not self.notes_open;return
             if evt.key==pygame.K_v:
+                self.sound('ui_click')
                 if self.voice.state=='СЛУШАЕТ':self.voice.stop()
                 else:self.voice.start()
                 return
@@ -298,8 +290,9 @@ class Game:
     def answer_puzzle(self,index):
         if not self.puzzle_open or not self.world:return
         if self.world.solve_puzzle(self.puzzle_open,index):
-            self.puzzle_open=None;self.save();self.sound('hack')
-        else:self.sound('alarm')
+            self.puzzle_open=None;self.save();self.sound('puzzle_ok')
+        else:self.sound('puzzle_error')
+        self.sound_log_counter=self.world.log_counter  # handled immediately; do not replay after leaving puzzle overlay
 
     def choose_ending(self,value):
         self.game_ending=value;self.world.ending=value;self.next_level()
@@ -310,13 +303,17 @@ class Game:
             elif tag=='heard' and self.world:self.world.message('РАСПОЗНАНО: '+payload,'voice')
     def tick(self,dt):
         self.read_voice()
-        if self.mode!='play' or not self.world:return
-        if self.action_open or self.map_open or self.notes_open or self.puzzle_open:return
+        if self.mode!='play' or not self.world:
+            self.audio.update(dt,self.mode,self.world)
+            return
+        if self.action_open or self.map_open or self.notes_open or self.puzzle_open:
+            self.audio.update(dt,'play',self.world,overlay=True)
+            return
         keys=pygame.key.get_pressed()
         dx=int(keys[pygame.K_d] or keys[pygame.K_RIGHT])-int(keys[pygame.K_a] or keys[pygame.K_LEFT])
         dy=int(keys[pygame.K_s] or keys[pygame.K_DOWN])-int(keys[pygame.K_w] or keys[pygame.K_UP])
         self.world.step(dt,dx,dy,bool(keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]))
-        # Adaptive AI decisions are stable during a room and recomputed on room entry.
+        # Adaptive AI decisions stay stable within a room.
         if not self.world.is_portal_tile(int(self.world.player.x),int(self.world.player.y)):
             new_key=frozenset(self.world.room_tiles())
             if self.room_key is None:self.room_key=new_key
@@ -327,23 +324,64 @@ class Game:
                 self.world.message(f'AI DIRECTOR: {reason} ({factor:.2f}x)','nova')
                 self.save()
         self.audio_events()
-        if self.world.status!='playing':self.mode='result';self.save()
+        self.audio.update(dt,'play',self.world)
+        if self.world.status!='playing':
+            self.sound('victory' if self.world.status=='won' else 'fail')
+            self.mode='result';self.save()
+
     def audio_events(self):
-        if self.world is None:return
-        entries=self.world.log
-        new_count=min(max(0,self.world.log_counter-self.sound_log_counter),len(entries))
+        """Emit one distinct cue per gameplay event, never on every rendered frame."""
+        w=self.world
+        if w is None:return
+        entries=w.log
+        new_count=min(max(0,w.log_counter-self.sound_log_counter),len(entries))
         for _,msg,kind in (entries[-new_count:] if new_count else []):
             t=msg.lower()
-            if 'модуль' in t and 'установлен' in t:self.sound('module')
-            elif 'найдено' in t:self.sound('pickup')
+            if 'дрон обнаружил' in t:self.sound('drone_alert')
+            elif 'камера навела' in t:self.sound('camera_lock')
+            elif 'импульс дрона' in t or 'выстрел турели' in t:self.sound('player_hit')
+            elif 'аптечка использована' in t:self.sound('medkit')
+            elif 'энергия новы восстановлена' in t:self.sound('battery')
+            elif 'маяк запущен' in t:self.sound('lure')
+            elif 'карта' in t and 'найдено' in t:self.sound('keycard')
+            elif 'модуль' in t and 'установлен' in t:self.sound('module')
+            elif 'найдено' in t or t.startswith('архив:'):self.sound('pickup')
             elif 'шлюз' in t and 'открыт' in t:self.sound('door')
+            elif 'ядро отключено' in t:self.sound('power_down')
+            elif 'ядро активировано' in t:self.sound('power_up')
             elif 'сканирован' in t:self.sound('scan')
-            elif 'взлом' in t:self.sound('hack')
-            elif 'импульс' in t and 'оглуш' in t:self.sound('pulse')
-            elif kind=='danger':self.sound('damage')
-        self.sound_log_counter=self.world.log_counter
-        if self.last_alert_level<2<=self.world.alert_level:self.sound('alarm')
-        self.last_alert_level=self.world.alert_level
+            elif 'взлом' in t or 'шифрование' in t:self.sound('hack')
+            elif 'маскировочное поле активировано' in t:self.sound('shield_on')
+            elif 'импульс активирован' in t or 'оглушено дронов' in t:self.sound('pulse_blast')
+            elif 'соединение активно' in t or 'терминал подключ' in t:self.sound('terminal_open')
+            elif kind=='warning' and 'невер' in t:self.sound('puzzle_error')
+        self.sound_log_counter=w.log_counter
+        # Track targeting stage before the camera crosses the critical 100% lock threshold.
+        active_warning={id for id,v in w.camera_suspicion.items() if .32<=v<1.0}
+        if active_warning-self.camera_warning_ids:self.sound('camera_warning')
+        self.camera_warning_ids=active_warning
+        # Combat events contain stable IDs, unlike visual animations (which are frame based).
+        for event in w.combat_events:
+            eid=event['id']
+            if eid<=self.last_combat_audio_id:continue
+            kind=event['kind']
+            if kind=='turret_shot':self.sound('turret_fire')
+            elif kind=='drone_attack':self.sound('drone_attack')
+            elif kind=='player_pulse':self.sound('pulse_blast')
+            self.last_combat_audio_id=eid
+        if w.alert>=47:
+            turret_aim=any(o['type']=='turret' and distance((o['x'],o['y']),(w.player.x,w.player.y))<=float(o.get('range',7)) and w.ray_clear(o['x'],o['y'],w.player.x,w.player.y) for o in w.objects)
+        else:turret_aim=False
+        if turret_aim and not self.turret_armed:self.sound('turret_target')
+        self.turret_armed=turret_aim
+        for idx,drone in enumerate(w.drones):
+            old=self.previous_drone_states.get(idx)
+            if old and drone.state=='search' and old not in ('search','chase','stunned'):
+                self.sound('drone_search')
+            self.previous_drone_states[idx]=drone.state
+        if self.last_alert_level<2<=w.alert_level:self.sound('security_alarm')
+        self.last_alert_level=w.alert_level
+
     def draw_background(self):
         self.window.fill(color('background'))
         for y in range(0,H,52):pygame.draw.line(self.window,(17,36,52),(0,y),(W,y))
@@ -372,7 +410,9 @@ class Game:
         self.button('PREMIUM',(73,634,210,44),lambda:self.set_mode('store'),small=True)
         self.button('ВЫХОД',(296,634,209,44),lambda:setattr(self,'running',False),small=True)
         self.text('v2.1 • CINEMATIC ART / Tiled / Vosk / Local Q-learning',23,746,14,'muted')
-    def set_mode(self,value):self.mode=value
+    def set_mode(self,value):
+        if value=='settings':self.settings_return_mode='pause' if self.mode=='pause' else 'menu'
+        self.mode=value
     def world_camera(self):
         p=self.world.player
         look_x=(0.22 if p.facing=='right' else -0.22 if p.facing=='left' else 0)*T
@@ -902,35 +942,44 @@ class Game:
             y+=46
         self.button('НАЗАД',(W//2-180,716,360,46),lambda:self.set_mode('pause' if self.world and self.world.status=='playing' else 'menu'))
     def settings(self):
-        self.panel_base('НАСТРОЙКИ','Удобство управления, звук и визуальные параметры')
-        self.rect((W//2-410,228,820,430),'panel','border',16)
+        self.panel_base('НАСТРОЙКИ','Звук, интерфейс и экран • изменения сохраняются сразу')
+        self.rect((W//2-410,208,820,516),'panel','border',16)
         left=W//2-368
         rows=[
             ('Полноэкранный режим','fullscreen',CFG.get('fullscreen',True)),
+            ('Музыкальное сопровождение','music_enabled',CFG.get('music_enabled',True)),
             ('Звуковые эффекты','sound_enabled',CFG.get('sound_enabled',True)),
-            ('Фоновый ambient','ambient_enabled',CFG.get('ambient_enabled',False)),
+            ('Шумы корабля / вентиляция','ambient_enabled',CFG.get('ambient_enabled',False)),
             ('Туман войны','fog_enabled',CFG.get('fog_enabled',True)),
         ]
-        y=270
+        y=220
         for title,key,val in rows:
-            self.rect((left,y,736,58),'panel_alt','border',10)
-            self.text(title,left+24,y+17,20,'text',True)
+            self.rect((left,y,736,42),'panel_alt','border',9)
+            self.text(title,left+20,y+10,17,'text',True)
             state='ВКЛ' if val else 'ВЫКЛ'
-            self.button(state,(left+560,y+12,150,34),lambda k=key:self.set_toggle(k),filled=val,small=True)
-            y+=72
-        # volume row
-        self.rect((left,y,736,76),'panel_alt','border',10)
-        self.text('Громкость',left+24,y+18,20,'text',True)
-        self.text(f"{CFG.get('master_volume',70)}%",left+318,y+19,20,'accent',True)
-        self.button('−',(left+500,y+16,52,36),lambda:self.adjust_value('master_volume',-10),small=True)
-        self.button('+',(left+658,y+16,52,36),lambda:self.adjust_value('master_volume',10),small=True)
-        pygame.draw.rect(self.window,(36,60,78),(left+560,y+29,88,10),border_radius=5)
-        fill=max(0,int(88*CFG.get('master_volume',70)/100))
-        pygame.draw.rect(self.window,color('accent'),(left+560,y+29,fill,10),border_radius=5)
-        y+=98
-        self.button('СБРОСИТЬ СОХРАНЕНИЕ',(left,y,300,44),self.reset_progress,small=True)
-        self.button('НАЗАД',(left+436,y,300,44),lambda:self.set_mode('pause' if self.world and self.mode!='menu' and self.world and self.world.status=='playing' else 'menu'),small=True)
-        self.text('Изменения сохраняются сразу в файле assets/ui/theme.json',W//2,680,15,'muted',center=True)
+            self.button(state,(left+576,y+5,129,32),lambda k=key:self.set_toggle(k),filled=val,small=True)
+            y+=46
+        volume_rows=[
+            ('Общая громкость','master_volume',70),
+            ('Музыка','music_volume',50),
+            ('Эффекты','sfx_volume',72),
+            ('Сигналы Новы','voice_volume',70),
+        ]
+        y+=4
+        for title,key,default in volume_rows:
+            level=max(0,min(100,int(CFG.get(key,default))))
+            self.rect((left,y,736,43),'panel_alt','border',9)
+            self.text(title,left+20,y+10,17,'text',True)
+            self.text(f'{level}%',left+329,y+10,17,'accent',True)
+            self.button('−',(left+452,y+5,39,32),lambda k=key:self.adjust_value(k,-5),small=True)
+            pygame.draw.rect(self.window,(36,60,78),(left+512,y+18,120,9),border_radius=4)
+            pygame.draw.rect(self.window,color('accent'),(left+512,y+18,int(120*level/100),9),border_radius=4)
+            self.button('+',(left+665,y+5,39,32),lambda k=key:self.adjust_value(k,5),small=True)
+            y+=47
+        y+=9
+        self.button('СБРОСИТЬ СОХРАНЕНИЕ',(left,y,304,42),self.reset_progress,small=True)
+        self.button('НАЗАД',(left+432,y,304,42),lambda:self.set_mode(getattr(self,'settings_return_mode','menu')),small=True)
+        self.text('Музыка и эффекты — отдельные каналы. Vosk распознаёт микрофон независимо от этой громкости.',W//2,716,13,'muted',center=True)
 
     def reset_progress(self):
         self.storage.clear()
@@ -1008,7 +1057,7 @@ class Game:
             dt=self.clock.tick(CFG.get('fps',60))/1000
             for event in pygame.event.get():self.event(event)
             self.tick(dt);self.draw()
-        self.save();self.voice.stop();pygame.quit()
+        self.save();self.voice.stop();self.audio.stop();pygame.quit()
 
 def main():
     try:Game().run()
