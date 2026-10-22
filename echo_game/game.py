@@ -8,42 +8,98 @@ from .world import World,ROOT,distance,COLORS
 from .voice import VoiceListener
 from .storage import Storage
 from .commands import ACTIONS
-from .config import read_settings
+from .config import read_settings, save_settings
 
 CFG=read_settings()
-W,H=int(CFG['screen_width']),int(CFG['screen_height']);VW=W-354;VH=H-48
+W,H=int(CFG['screen_width']),int(CFG['screen_height'])
+HUD_W=344
+VW=W-HUD_W
+VH=H
 T=48
 PAL=CFG['palette']
 def color(key):return pygame.Color(PAL.get(key,key))
 
 class Game:
     def __init__(self):
+        global W,H,VW,VH,PAL
         pygame.init()
         try:pygame.display.set_caption('ECHO: Последний сигнал • Атлас-9')
         except Exception:pass
-        self.window=pygame.display.set_mode((W,H))
+        flags=0
+        if CFG.get('fullscreen',True):
+            info=pygame.display.Info()
+            W,H=info.current_w,info.current_h
+            flags=pygame.FULLSCREEN
+        else:
+            W,H=int(CFG['screen_width']),int(CFG['screen_height'])
+        VW=max(860,W-HUD_W);VH=H
+        PAL=CFG['palette']
+        self.window=pygame.display.set_mode((W,H),flags)
         self.clock=pygame.time.Clock();self.running=True
+        self.fullscreen=bool(flags & pygame.FULLSCREEN)
         self.sounds={};self.sound_log_counter=0;self.last_alert_level=0
         self.fonts={}
         self.mode='menu';self.world=None
         self.storage=Storage();self.voice=VoiceListener()
         self.assets={};self.cover=None;self.tiles=None
-        self.buttons=[];self.action_open=False;self.map_open=False
+        self.buttons=[];self.action_open=False;self.map_open=False;self.notes_open=False
         self.message_note='';self.total_score=0;self.game_ending='';self.prev_level=1
+        self.hover_object=None
         self.load_art()
         self.load_sounds()
+        self.apply_audio_settings()
     def load_sounds(self):
         try:
             if pygame.mixer.get_init() is None:pygame.mixer.init()
             for wav in (ROOT/"assets"/"audio").glob("*.wav"):
                 self.sounds[wav.stem]=pygame.mixer.Sound(str(wav))
-                self.sounds[wav.stem].set_volume(.36 if wav.stem!="ambient" else .21)
-            if "ambient" in self.sounds:self.sounds["ambient"].play(-1)
         except pygame.error:pass  # Audio devices are optional; the game remains playable
+
+    def apply_audio_settings(self):
+        master=max(0,min(100,int(CFG.get('master_volume',70))))/100
+        for key,snd in self.sounds.items():
+            base=.10 if key=='ambient' else .34
+            snd.set_volume(base*master if CFG.get('sound_enabled',True) else 0)
+        try:
+            if 'ambient' in self.sounds:
+                self.sounds['ambient'].stop()
+                if CFG.get('sound_enabled',True) and CFG.get('ambient_enabled',False):
+                    self.sounds['ambient'].play(-1)
+        except pygame.error:
+            pass
+
+    def persist_settings(self):
+        global CFG,PAL
+        CFG=save_settings(CFG)
+        PAL=CFG['palette']
+        self.apply_audio_settings()
+
     def sound(self,key):
         try:
             if CFG.get("sound_enabled",True) and key in self.sounds:self.sounds[key].play()
         except pygame.error:pass
+    def toggle_fullscreen(self):
+        global W,H,VW,VH
+        self.fullscreen=not self.fullscreen
+        if self.fullscreen:
+            info=pygame.display.Info()
+            W,H=info.current_w,info.current_h
+            self.window=pygame.display.set_mode((W,H),pygame.FULLSCREEN)
+        else:
+            W,H=int(CFG['screen_width']),int(CFG['screen_height'])
+            self.window=pygame.display.set_mode((W,H))
+        VW=max(860,W-HUD_W);VH=H
+    def set_toggle(self,key):
+        CFG[key]=not CFG.get(key,False)
+        if key=='fullscreen':
+            self.toggle_fullscreen()
+            CFG['fullscreen']=self.fullscreen
+        self.persist_settings()
+
+    def adjust_value(self,key,delta,lo=0,hi=100):
+        CFG[key]=max(lo,min(hi,int(CFG.get(key,0))+delta))
+        self.persist_settings()
+
     def font(self,size,bold=False):
         key=(size,bold)
         if key not in self.fonts:
@@ -105,7 +161,7 @@ class Game:
             self.total_score=snapshot.get('total_score',0)
         else:
             self.world=World(1);self.total_score=0;self.storage.clear()
-        self.mode='play';self.action_open=False;self.map_open=False
+        self.mode='play';self.action_open=False;self.map_open=False;self.notes_open=False
         self.sound_log_counter=self.world.log_counter;self.last_alert_level=0
         if not challenge:self.save()
     def save(self):
@@ -139,9 +195,12 @@ class Game:
         if evt.type==pygame.QUIT:self.running=False;return
         if evt.type==pygame.MOUSEBUTTONDOWN and evt.button==1:self.handle_click(evt.pos);return
         if evt.type!=pygame.KEYDOWN:return
+        if evt.key==pygame.K_F11:
+            self.toggle_fullscreen();return
         if evt.key==pygame.K_ESCAPE:
             if self.action_open:self.action_open=False;return
             if self.map_open:self.map_open=False;return
+            if self.notes_open:self.notes_open=False;return
             if self.mode=='play':self.mode='pause';self.save()
             elif self.mode=='pause':self.mode='play'
             else:self.mode='menu'
@@ -151,6 +210,7 @@ class Game:
             if evt.key in (pygame.K_e,pygame.K_SPACE):w.interact();return
             if evt.key==pygame.K_TAB:self.action_open=not self.action_open;return
             if evt.key==pygame.K_m:self.map_open=not self.map_open;return
+            if evt.key==pygame.K_n:self.notes_open=not self.notes_open;return
             if evt.key==pygame.K_v:
                 if self.voice.state=='СЛУШАЕТ':self.voice.stop()
                 else:self.voice.start()
@@ -179,7 +239,7 @@ class Game:
     def tick(self,dt):
         self.read_voice()
         if self.mode!='play' or not self.world:return
-        if self.action_open or self.map_open:return
+        if self.action_open or self.map_open or self.notes_open:return
         keys=pygame.key.get_pressed()
         dx=int(keys[pygame.K_d] or keys[pygame.K_RIGHT])-int(keys[pygame.K_a] or keys[pygame.K_LEFT])
         dy=int(keys[pygame.K_s] or keys[pygame.K_DOWN])-int(keys[pygame.K_w] or keys[pygame.K_UP])
@@ -206,6 +266,10 @@ class Game:
         self.window.fill(color('background'))
         for y in range(0,H,52):pygame.draw.line(self.window,(17,36,52),(0,y),(W,y))
         for x in range(0,W,52):pygame.draw.line(self.window,(17,36,52),(x,0),(x,H))
+        glow=pygame.Surface((W,H),pygame.SRCALPHA)
+        pygame.draw.circle(glow,(67,214,224,18),(W-180,110),220)
+        pygame.draw.circle(glow,(242,120,133,14),(110,H-80),170)
+        self.window.blit(glow,(0,0))
     def menu(self):
         self.draw_background()
         if self.cover:
@@ -218,13 +282,18 @@ class Game:
         self.button('ПРОДОЛЖИТЬ',(73,514,210,48),lambda:self.start(resume=True),disabled=self.storage.load() is None,small=True)
         self.button('КАК ИГРАТЬ',(296,514,209,48),lambda:self.set_mode('help'),small=True)
         self.button('РЕКОРДЫ',(73,574,210,48),lambda:self.set_mode('records'),small=True)
-        self.button('PREMIUM',(296,574,209,48),lambda:self.set_mode('store'),small=True)
-        self.button('ВЫХОД',(73,636,432,44),lambda:setattr(self,'running',False),small=True)
+        self.button('НАСТРОЙКИ',(296,574,209,48),lambda:self.set_mode('settings'),small=True)
+        self.button('PREMIUM',(73,634,210,44),lambda:self.set_mode('store'),small=True)
+        self.button('ВЫХОД',(296,634,209,44),lambda:setattr(self,'running',False),small=True)
         self.text('v1.0 • Авторские SVG / карты Tiled / Python + Vosk',23,757,15,'muted')
     def set_mode(self,value):self.mode=value
     def world_camera(self):
         p=self.world.player
-        return (max(0,min(self.world.width*T-VW,p.x*T-VW*.5)),max(0,min(self.world.height*T-VH,p.y*T-VH*.52)))
+        look_x=(0.22 if p.facing=='right' else -0.22 if p.facing=='left' else 0)*T
+        look_y=(0.20 if p.facing=='down' else -0.12 if p.facing=='up' else 0)*T
+        target_x=p.x*T-VW*0.5+look_x
+        target_y=p.y*T-VH*0.5+look_y
+        return (max(0,min(self.world.width*T-VW,target_x)),max(0,min(self.world.height*T-VH,target_y)))
     def px(self,x,y,camera):return (int(x*T-camera[0]),int(y*T-camera[1]))
     def draw_map_tiles(self,camera):
         w=self.world
@@ -235,35 +304,83 @@ class Game:
             for x in range(sx,ex):
                 gid=w.tiles[y*w.width+x]
                 xx=int(x*T-camera[0]);yy=int(y*T-camera[1])
-                if self.tiles:
-                    self.window.blit(self.tiles,(xx,yy),pygame.Rect((gid-1)*48,0,48,48))
-                else:pygame.draw.rect(self.window,(33,53,72) if gid not in(2,5) else (64,83,101),(xx,yy,T,T))
+                base=(25,43,63) if (x+y)%2==0 else (28,47,68)
+                pygame.draw.rect(self.window,base,(xx,yy,T,T))
+                pygame.draw.rect(self.window,(34,58,82),(xx,yy,T,T),1)
+                if gid in (2,5):
+                    fill=(61,82,103) if gid==2 else (73,95,116)
+                    pygame.draw.rect(self.window,fill,(xx+2,yy+2,T-4,T-4),border_radius=4)
+                    pygame.draw.rect(self.window,(143,176,202),(xx+3,yy+3,T-6,T-6),2,border_radius=4)
+                    pygame.draw.rect(self.window,(91,114,138),(xx+8,yy+10,T-16,5),border_radius=3)
+                else:
+                    if gid==3:
+                        pygame.draw.circle(self.window,(70,98,126),(xx+T//2,yy+T//2),10,2)
+                    elif gid==4:
+                        pygame.draw.rect(self.window,(82,112,138),(xx+12,yy+8,24,32),2,border_radius=2)
+                        for k in range(3):pygame.draw.line(self.window,(110,145,170),(xx+15,yy+14+k*7),(xx+33,yy+14+k*7),2)
+                    elif gid in (6,7,8):
+                        pygame.draw.line(self.window,(88,152,180),(xx+10,yy+24),(xx+38,yy+24),3)
         self.window.set_clip(None)
+
+    def draw_fog(self,camera):
+        w=self.world
+        overlay=pygame.Surface((VW,VH),pygame.SRCALPHA)
+        overlay.fill((3,8,15,238))
+        px,py=w.player.x,w.player.y
+        radius=6.8
+        sx=max(0,int(px-radius-1));ex=min(w.width,int(px+radius+2))
+        sy=max(0,int(py-radius-1));ey=min(w.height,int(py+radius+2))
+        for gy in range(sy,ey):
+            for gx in range(sx,ex):
+                cx,cy=gx+0.5,gy+0.5
+                if distance((px,py),(cx,cy))<=radius and w.ray_clear(px,py,cx,cy):
+                    rx=int(gx*T-camera[0]);ry=int(gy*T-camera[1])
+                    pygame.draw.rect(overlay,(0,0,0,0),(rx,ry,T,T))
+        psx,psy=self.px(px,py,camera)
+        pygame.draw.circle(overlay,(0,0,0,0),(psx,psy),48)
+        self.window.blit(overlay,(0,0))
+
     def draw_cones(self,camera):
         w=self.world
         layer=pygame.Surface((VW,VH),pygame.SRCALPHA)
-        def rays(sx,sy,angle,radius,width,rgb,opacity):
-            pts=[self.px(sx,sy,camera)]
-            for i in range(19):
-                theta=math.radians(angle-width/2+i*width/18)
-                stop=radius
-                for n in range(1,int(radius*4)+1):
-                    dist=n/4
-                    x=sx+math.cos(theta)*dist;y=sy+math.sin(theta)*dist
-                    if w.collides(x,y,.01):stop=dist-.25;break
-                pts.append(self.px(sx+math.cos(theta)*stop,sy+math.sin(theta)*stop,camera))
-            if len(pts)>2:pygame.draw.polygon(layer,(*rgb,opacity),pts)
+        def sector(sx,sy,angle,radius,width,rgb,opacity,samples=80,outline=None):
+            origin=self.px(sx,sy,camera)
+            pts=[origin]
+            for i in range(samples+1):
+                theta=math.radians(angle-width/2+i*width/max(1,samples))
+                pts.append(self.px(sx+math.cos(theta)*radius,sy+math.sin(theta)*radius,camera))
+            if len(pts)>2:
+                pygame.draw.polygon(layer,(*rgb,opacity),pts)
+                if outline and width<360:
+                    pygame.draw.aalines(layer,(*outline,210),False,pts[1:])
+                    pygame.draw.aaline(layer,(*outline,210),origin,pts[1])
+                    pygame.draw.aaline(layer,(*outline,210),origin,pts[-1])
         for o in w.objects:
             if o['type']=='camera' and w.time>=w.cam_disable_until:
                 angle=o.get('angle',0)+math.sin(w.time*.85+o['x'])*o.get('sweep',50)
-                rays(o['x'],o['y'],angle,o.get('range',7),64,(240,80,97),66)
+                sector(o['x'],o['y'],angle,o.get('range',7),64,(242,87,108),46,samples=96,outline=(255,157,170))
         for drone in w.drones:
             if w.time>=drone.stunned:
-                rays(drone.x,drone.y,0,min(3.7,drone.vision),360,(245,197,95),17)
+                pos=self.px(drone.x,drone.y,camera)
+                pygame.draw.circle(layer,(245,197,95,18),pos,int(min(3.7,drone.vision)*T))
+                pygame.draw.circle(layer,(245,197,95,70),pos,int(min(3.7,drone.vision)*T),1)
         self.window.blit(layer,(0,0))
+
     def draw_entities(self,camera):
         w=self.world
         self.window.set_clip(pygame.Rect(0,0,VW,VH))
+        mouse=pygame.mouse.get_pos()
+        self.hover_object=None
+        names={'main_terminal':'terminal','aux_terminal':'terminal','broken_terminal':'terminal','exit':'exit','core':'core','module':'module','medkit':'medkit','battery':'battery','keycard':'keycard','lure':'lure','note':'note','camera':'camera','turret':'turret'}
+        marker_colors={
+            'module':'good','medkit':'bad','battery':'accent','keycard':'gold','lure':'gold','note':'muted',
+            'main_terminal':'accent','aux_terminal':'accent','core':'gold','exit':'good','camera':'bad','turret':'bad'
+        }
+        marker_labels={
+            'module':'МОДУЛЬ','medkit':'АПТЕЧКА','battery':'БАТАРЕЯ','keycard':'КЛЮЧ','lure':'МАЯК',
+            'note':'ЗАПИСЬ','main_terminal':'ТЕРМИНАЛ','aux_terminal':'КОНСОЛЬ','core':'ЯДРО','exit':'ВЫХОД',
+            'camera':'КАМЕРА','turret':'ТУРЕЛЬ'
+        }
         for o in w.objects:
             if o['taken'] or o['type']=='spawn':continue
             typ=o['type'];sx,sy=self.px(o['x'],o['y'],camera)
@@ -271,20 +388,49 @@ class Game:
             if typ=='gate':
                 if w.gates[o['gate_id']]:
                     pygame.draw.circle(self.window,color('good'),(sx,sy),8,2)
+                    self.text('ОТКР.',sx,sy-18,10,'good',True,center=True)
                     continue
-                self.image('gate',sx,sy,46,46);continue
-            names={'main_terminal':'terminal','aux_terminal':'terminal','broken_terminal':'terminal','exit':'exit','core':'core','module':'module','medkit':'medkit','battery':'battery','keycard':'keycard','lure':'lure','note':'note','camera':'camera','turret':'turret'}
+                self.image('gate',sx,sy,46,46)
+                pygame.draw.rect(self.window,(10,28,42),(sx-18,sy-30,36,14),border_radius=5)
+                self.text('ШЛЮЗ',sx,sy-29,9,'bad',True,center=True)
+                continue
             asset=names.get(typ)
             if not asset:continue
-            self.image(asset,sx,sy,42 if typ not in ('camera','turret') else 46)
+            size=42 if typ not in ('camera','turret') else 46
+            pulse=int((math.sin(w.time*3+o['id'])*0.5+0.5)*3)
+            self.image(asset,sx,sy,size)
+            obj_rect=pygame.Rect(int(sx-size/2),int(sy-size/2),size,size)
+            hover=obj_rect.collidepoint(mouse)
+            key=marker_colors.get(typ)
+            if key and typ not in ('camera','turret'):
+                pygame.draw.circle(self.window,color(key),(sx,sy),size//2+6+pulse,1)
+            if typ=='camera':
+                pygame.draw.circle(self.window,color('bad'),(sx,sy),22,1)
+                pygame.draw.line(self.window,color('bad'),(sx,sy),(sx,sy+22),1)
+            if typ=='turret':
+                pygame.draw.circle(self.window,color('bad'),(sx,sy),24,1)
             if typ in ('main_terminal','core','exit'):
-                pygame.draw.circle(self.window,color('accent'),(sx,sy),25,2)
+                pygame.draw.circle(self.window,color('accent' if typ!='core' else 'gold'),(sx,sy),25,2)
             if typ=='broken_terminal':pygame.draw.line(self.window,color('bad'),(sx-15,sy-15),(sx+15,sy+15),3)
+            if hover:
+                self.hover_object=o
+                pygame.draw.circle(self.window,color('accent'),obj_rect.center,max(18,size//2+8),2)
+            if typ in marker_labels:
+                lab=marker_labels[typ]
+                tw=self.font(10,True).size(lab)[0]
+                bx=sx-(tw+10)//2
+                by=sy-size//2-18
+                self.rect((bx,by,tw+10,14),'panel','border',5)
+                self.text(lab,sx,by+2,10,key if key else 'muted',True,center=True)
         for drone in w.drones:
             sx,sy=self.px(drone.x,drone.y,camera)
             self.image('drone',sx,sy,48)
-            if drone.state=='stunned':self.text('ОГЛУШЁН',sx,sy-35,12,'accent',True,center=True)
-            elif drone.state in ('chase','search'):self.text('!',sx,sy-34,24,'bad',True,center=True)
+            pygame.draw.circle(self.window,color('gold'),(sx,sy),26,1)
+            state_label={'patrol':'ПАТРУЛЬ','search':'ПОИСК','chase':'ПРЕСЛЕД.','stunned':'ОГЛУШЁН'}.get(drone.state,'ДРОН')
+            tone='bad' if drone.state=='chase' else 'gold' if drone.state=='search' else 'accent' if drone.state=='stunned' else 'muted'
+            self.rect((sx-33,sy-35,66,14),'panel','border',5)
+            self.text(state_label,sx,sy-33,9,tone,True,center=True)
+            if drone.state in ('chase','search'):self.text('!',sx,sy-49,22,'bad',True,center=True)
         p=w.player;sx,sy=self.px(p.x,p.y,camera)
         if w.shielded:
             glow=pygame.Surface((110,110),pygame.SRCALPHA)
@@ -299,65 +445,105 @@ class Game:
         self.image('nova',nx,ny,32)
         if w.lure_pos and w.time<w.lure_until:
             lx,ly=self.px(*w.lure_pos,camera);pygame.draw.circle(self.window,color('gold'),(lx,ly),12,2)
-        # interaction prompt near closest object
         n=w.nearby(r=1.4)
         if n:
             self.rect((max(10,min(VW-280,sx-120)),max(6,sy-86),258,27),'panel','border',5)
             self.text('[E] '+n['name'],max(18,min(VW-273,sx-112)),max(7,sy-82),15,'text',maxw=242)
+        if self.hover_object:
+            label=self.hover_object['name'] or self.hover_object['type']
+            tw=self.font(14,True).size(label)[0]
+            mx,my=mouse
+            self.rect((mx+16,my+14,tw+18,28),'panel','border',6)
+            self.text(label,mx+25,my+20,14,'text',True)
         self.window.set_clip(None)
+
     def bar(self,label,value,x,y,width,tone):
         self.text(label,x,y,14,'muted',True)
         pygame.draw.rect(self.window,(37,61,79),(x,y+22,width,13),border_radius=5)
         pygame.draw.rect(self.window,color(tone),(x,y+22,max(0,int(width*min(1,value/100))),13),border_radius=5)
         self.text(f'{int(value)}%',x+width-45,y,14,'text',True)
     def hud(self):
-        w=self.world;x=VW+15
+        w=self.world;x=VW+12;pw=W-VW-24
         self.rect((VW,0,W-VW,VH),'panel',None,0)
-        pygame.draw.line(self.window,color('border'),(VW,0),(VW,VH),2)
-        self.text('ECHO / НОВА',x+4,19,27,'accent',True)
-        self.text(f'СЕКТОР {w.level}   •   '+w.title,x+4,63,15,'muted',True,maxw=310)
-        self.bar('ЗДОРОВЬЕ',w.player.hp,x+4,102,301,'bad')
-        self.bar('ЭНЕРГИЯ НОВЫ',w.player.energy,x+4,152,301,'accent')
-        self.bar('УРОВЕНЬ ТРЕВОГИ',w.alert,x+4,202,301,'gold')
-        self.text('ТЕКУЩАЯ ЦЕЛЬ',x+4,256,15,'accent',True)
-        self.rect((x+3,279,312,90),'panel_alt','border',8)
-        self.paragraph(w.mission,x+15,292,286,17,22,'text',3)
-        self.text('МОДУЛИ НОВЫ',x+4,390,14,'accent',True)
-        descriptions={'scan':'СКАН','hack':'ВЗЛОМ','shield':'ЩИТ','pulse':'ИМПУЛЬС','control':'УПРАВЛЕНИЕ','memory':'ПАМЯТЬ'}
+        self.rect((VW+8,10,W-VW-16,VH-20),'panel_alt','border',16)
+        self.text('ECHO / НОВА',x+10,24,28,'accent',True)
+        self.text(f'СЕКТОР {w.level}  •  {w.title}',x+10,63,15,'muted',True,maxw=pw-20)
+        self.text(f'МИКРОФОН: {self.voice.state}',x+10,89,13,'good' if self.voice.state=='СЛУШАЕТ' else 'gold',True,maxw=pw-20)
+        self.bar('ЗДОРОВЬЕ',w.player.hp,x+10,118,pw-24,'bad')
+        self.bar('ЭНЕРГИЯ НОВЫ',w.player.energy,x+10,170,pw-24,'accent')
+        self.bar('ТРЕВОГА',w.alert,x+10,222,pw-24,'gold')
+        self.text('ТЕКУЩАЯ ЦЕЛЬ',x+10,280,14,'accent',True)
+        self.rect((x+9,304,pw-18,94),'panel','border',10)
+        self.paragraph(w.mission,x+22,319,pw-45,17,22,'text',4)
+        self.text('МОДУЛИ НОВЫ',x+10,421,14,'accent',True)
+        descriptions={'scan':'СКАН','hack':'ВЗЛОМ','shield':'ЩИТ','pulse':'ИМПУЛЬС','control':'УПРАВЛ.','memory':'ПАМЯТЬ'}
+        cell_w=(pw-28)//3
         for i,(a,label) in enumerate(descriptions.items()):
-            rx=x+4+(i%3)*107;ry=416+(i//3)*38
-            self.rect((rx,ry,101,30),'panel_alt' if a in w.abilities else 'background','good' if a in w.abilities else 'border',6)
-            self.text(label,rx+50,ry+8,12,'good' if a in w.abilities else 'muted',True,center=True)
-        self.text('ИНВЕНТАРЬ',x+4,505,14,'accent',True)
-        self.text(f"[H] Аптечка: {w.inventory['medkit']}",x+6,531,17)
-        self.text(f"[B] Батарея: {w.inventory['battery']}",x+6,560,17)
-        self.text(f"[G] Маяк: {w.inventory['lure']}   •   Ключ: {w.inventory['keycard']}",x+6,589,16)
-        self.text(f'ОЧКИ  {w.score+ self.total_score:06d}',x+5,628,20,'gold',True)
-        self.text(f'ВРЕМЯ  {int(w.time)//60:02d}:{int(w.time)%60:02d}',x+5,657,17,'muted')
-        self.button('КОМАНДЫ [TAB]',(x+3,688,313,33),lambda:setattr(self,'action_open',not self.action_open),small=True)
+            rx=x+10+(i%3)*(cell_w+4);ry=447+(i//3)*42
+            self.rect((rx,ry,cell_w,32),'panel_soft' if a in w.abilities else 'background','good' if a in w.abilities else 'border',8)
+            self.text(label,rx+cell_w//2,ry+8,12,'good' if a in w.abilities else 'muted',True,center=True)
+        self.text('ИНВЕНТАРЬ',x+10,541,14,'accent',True)
+        self.text(f"[H] Аптечка: {w.inventory['medkit']}",x+12,566,17)
+        self.text(f"[B] Батарея: {w.inventory['battery']}",x+12,593,17)
+        self.text(f"[G] Маяк: {w.inventory['lure']}",x+12,620,16)
+        self.text(f"Ключ-карта: {w.inventory['keycard']}",x+140,620,16)
+        info_y=VH-140
+        self.text(f'ОЧКИ  {w.score+self.total_score:06d}',x+10,info_y,20,'gold',True)
+        self.text(f'ВРЕМЯ  {int(w.time)//60:02d}:{int(w.time)%60:02d}',x+10,info_y+28,17,'muted')
+        btn_y=VH-104
+        self.button('КОМАНДЫ [TAB]',(x+10,btn_y,pw-20,30),lambda:setattr(self,'action_open',not self.action_open),small=True)
+        self.button('ЗАМЕТКИ [N]',(x+10,btn_y+34,pw-20,30),lambda:setattr(self,'notes_open',not self.notes_open),small=True)
+        self.button('КАРТА [M]',(x+10,btn_y+68,pw-20,30),lambda:setattr(self,'map_open',not self.map_open),small=True)
     def messages(self):
         w=self.world
-        y=VH-114
-        self.rect((15,y,VW-29,101),'panel','border',8)
-        for i,(_,text,typ) in enumerate(w.log[-3:]):
-            tone={'danger':'bad','warning':'gold','success':'good','nova':'accent','voice':'muted'}.get(typ,'text')
-            self.text('›',25,y+11+i*30,18,tone,True)
-            self.text(text,47,y+12+i*30,15,tone,maxw=VW-100)
+        if not w.log:return
+        _,text,typ=w.log[-1]
+        tone={'danger':'bad','warning':'gold','success':'good','nova':'accent','voice':'muted','info':'text'}.get(typ,'text')
+        width=min(530,VW-120)
+        y=18
+        self.rect((18,y,width,38),'panel','border',8)
+        self.text(text,32,y+11,14,tone,True,maxw=width-28)
+
+    def notes_panel(self):
+        notes=self.world.history or ['Записей пока нет.']
+        self.rect((86,60,VW-172,VH-120),'panel','accent',14)
+        self.text('ЗАМЕТКИ И АРХИВЫ [N]',VW//2,86,24,'accent',True,center=True)
+        self.text('Собранные записи корабля и подсказки к головоломкам',VW//2,117,15,'muted',center=True)
+        y=152
+        for i,note in enumerate(notes[-8:],1):
+            h=56
+            self.rect((112,y,VW-224,h),'panel_alt','border',9)
+            self.text(f'{i}.',128,y+10,17,'accent',True)
+            self.paragraph(note,162,y+10,VW-292,16,20,'text',2)
+            y+=64
+            if y>VH-120:break
+
     def mini_map(self,x,y,scale=7):
         w=self.world
         self.rect((x-13,y-35,w.width*scale+26,w.height*scale+56),'panel','border',10)
         self.text('КАРТА СЕКТОРА • [M]',x,y-24,15,'accent',True)
+        px,py=w.player.x,w.player.y
+        radius=7.2
         for yy in range(w.height):
             for xx in range(w.width):
-                tile=w.tiles[yy*w.width+xx]
-                shade=(68,86,104) if tile in(2,5) else (31,54,72)
+                cx,cy=xx+0.5,yy+0.5
+                visible=distance((px,py),(cx,cy))<=radius and w.ray_clear(px,py,cx,cy)
+                if not visible:
+                    shade=(11,20,29)
+                else:
+                    tile=w.tiles[yy*w.width+xx]
+                    shade=(68,86,104) if tile in(2,5) else (31,54,72)
                 pygame.draw.rect(self.window,shade,(x+xx*scale,y+yy*scale,scale,scale))
         for o in w.objects:
+            if o.get('taken'):continue
+            visible=distance((px,py),(o['x'],o['y']))<=radius and w.ray_clear(px,py,o['x'],o['y'])
+            if not visible:continue
             sx=x+int(o['x']*scale);sy=y+int(o['y']*scale)
             shade=(84,215,217) if o['type']=='main_terminal' else (240,208,114) if o['type']=='core' else (119,230,160) if o['type']=='exit' else None
             if o['type']=='gate' and not w.gates[o['gate_id']]:shade=(239,114,125)
             if shade:pygame.draw.circle(self.window,shade,(sx,sy),4)
         pygame.draw.circle(self.window,(241,250,252),(x+int(w.player.x*scale),y+int(w.player.y*scale)),5)
+
     def action_menu(self):
         self.rect((145,55,VW-290,VH-105),'panel','accent',13)
         self.text('ГОЛОСОВЫЕ КОМАНДЫ НОВЫ',VW//2,78,26,'accent',True,center=True)
@@ -372,21 +558,20 @@ class Game:
         self.world.command(command)
         self.action_open=False
     def play(self):
-        w=self.world
         self.window.fill((7,16,27))
         camera=self.world_camera()
         self.draw_map_tiles(camera)
         self.draw_cones(camera)
         self.draw_entities(camera)
+        if CFG.get('fog_enabled',True):self.draw_fog(camera)
         self.hud();self.messages()
+        self.rect((18,H-30,390,18),'panel','border',8)
+        self.text('WASD • Shift • E • Tab • M • N • V • F11',28,H-27,11,'muted',True)
         if self.map_open:
-            self.rect((VW//2-190,42,380,300),'panel','accent',12)
-            self.mini_map(VW//2-140,93,7)
+            self.rect((VW//2-190,72,380,300),'panel','accent',12)
+            self.mini_map(VW//2-140,123,7)
+        if self.notes_open:self.notes_panel()
         if self.action_open:self.action_menu()
-        pygame.draw.rect(self.window,color('background'),(0,VH,W,H-VH))
-        pygame.draw.line(self.window,color('border'),(0,VH),(W,VH),2)
-        self.text('WASD — движение   SHIFT — бег   E — взаимодействие   TAB — команды   M — карта',15,VH+15,15,'muted')
-        self.text(f'МИКРОФОН [V]: {self.voice.state}',W-345,VH+15,15,'good' if self.voice.state=='СЛУШАЕТ' else 'gold',True)
     def panel_base(self,title,subtitle=''):
         self.draw_background();self.text('ECHO',W//2,42,63,'accent',True,center=True)
         self.text(title,W//2,140,31,'text',True,center=True)
@@ -396,14 +581,15 @@ class Game:
         self.button('ПРОДОЛЖИТЬ',(W//2-215,292,430,58),lambda:self.set_mode('play'),True)
         self.button('СОХРАНИТЬ И В МЕНЮ',(W//2-215,370,430,58),self.pause_to_menu)
         self.button('ПОМОЩЬ',(W//2-215,448,430,58),lambda:self.set_mode('help'))
+        self.button('НАСТРОЙКИ',(W//2-215,526,430,52),lambda:self.set_mode('settings'))
     def pause_to_menu(self):self.save();self.mode='menu'
     def help(self):
         self.panel_base('ИНСТРУКЦИЯ УПРАВЛЕНИЯ','Побег из военного комплекса «Атлас-9»')
         info=[
             'WASD / стрелки — идти; Shift — бежать (создаёт шум); E / Space — подобрать или изучить.',
             'Tab — открыть список всех команд. Клавиши 1–0, - , =, Backspace повторяют голос.',
-            'V — включить или выключить микрофон. Без модели Vosk можно проходить с клавиатурой.',
-            'M — карта. H — аптечка. B — батарея. G — отвлекающий маяк.',
+            'V — включить или выключить микрофон. F11 — полноэкранный режим. Без модели Vosk можно проходить с клавиатурой.',
+            'M — карта. N — заметки. H — аптечка. B — батарея. G — отвлекающий маяк.',
             'Сначала ищи модули Новы и карту персонала. Затем найди главный терминал.',
             'Терминал: Подключение → Сканируй → Взломай → Открой.',
             'Энергетическое ядро: Сканируй → Отключи нужный контур → Активируй другой → Открой.',
@@ -417,6 +603,41 @@ class Game:
             self.text('• '+line,133,y+3,16,'text',maxw=W-275)
             y+=46
         self.button('НАЗАД',(W//2-180,716,360,46),lambda:self.set_mode('pause' if self.world and self.world.status=='playing' else 'menu'))
+    def settings(self):
+        self.panel_base('НАСТРОЙКИ','Удобство управления, звук и визуальные параметры')
+        self.rect((W//2-410,228,820,430),'panel','border',16)
+        left=W//2-368
+        rows=[
+            ('Полноэкранный режим','fullscreen',CFG.get('fullscreen',True)),
+            ('Звуковые эффекты','sound_enabled',CFG.get('sound_enabled',True)),
+            ('Фоновый ambient','ambient_enabled',CFG.get('ambient_enabled',False)),
+            ('Туман войны','fog_enabled',CFG.get('fog_enabled',True)),
+        ]
+        y=270
+        for title,key,val in rows:
+            self.rect((left,y,736,58),'panel_alt','border',10)
+            self.text(title,left+24,y+17,20,'text',True)
+            state='ВКЛ' if val else 'ВЫКЛ'
+            self.button(state,(left+560,y+12,150,34),lambda k=key:self.set_toggle(k),filled=val,small=True)
+            y+=72
+        # volume row
+        self.rect((left,y,736,76),'panel_alt','border',10)
+        self.text('Громкость',left+24,y+18,20,'text',True)
+        self.text(f"{CFG.get('master_volume',70)}%",left+318,y+19,20,'accent',True)
+        self.button('−',(left+500,y+16,52,36),lambda:self.adjust_value('master_volume',-10),small=True)
+        self.button('+',(left+658,y+16,52,36),lambda:self.adjust_value('master_volume',10),small=True)
+        pygame.draw.rect(self.window,(36,60,78),(left+560,y+29,88,10),border_radius=5)
+        fill=max(0,int(88*CFG.get('master_volume',70)/100))
+        pygame.draw.rect(self.window,color('accent'),(left+560,y+29,fill,10),border_radius=5)
+        y+=98
+        self.button('СБРОСИТЬ СОХРАНЕНИЕ',(left,y,300,44),self.reset_progress,small=True)
+        self.button('НАЗАД',(left+436,y,300,44),lambda:self.set_mode('pause' if self.world and self.mode!='menu' and self.world and self.world.status=='playing' else 'menu'),small=True)
+        self.text('Изменения сохраняются сразу в файле assets/ui/theme.json',W//2,680,15,'muted',center=True)
+
+    def reset_progress(self):
+        self.storage.clear()
+        self.total_score=0
+
     def records(self):
         self.panel_base('ТАБЛИЦА РЕЗУЛЬТАТОВ','SQLite • сохранение между запусками')
         self.text('СЕКТОР',170,264,17,'accent',True);self.text('ОЧКИ',365,264,17,'accent',True)
@@ -478,6 +699,7 @@ class Game:
         elif self.mode=='pause':self.pause()
         elif self.mode=='help':self.help()
         elif self.mode=='records':self.records()
+        elif self.mode=='settings':self.settings()
         elif self.mode=='store':self.store()
         elif self.mode=='result':self.result()
         elif self.mode=='ending_choice':self.ending_choice()

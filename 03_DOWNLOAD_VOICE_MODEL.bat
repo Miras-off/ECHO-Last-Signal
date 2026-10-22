@@ -1,19 +1,23 @@
 @echo off
-chcp 65001 >nul
+setlocal
 cd /d "%~dp0"
-title ECHO - установка русского распознавания голоса
+title ECHO - Voice Setup
+
 if not exist ".venv\Scripts\python.exe" (
-  echo Сначала запусти 01_SETUP.bat
-  pause
-  exit /b 1
+    echo [ERROR] Run 01_SETUP.bat first.
+    pause
+    exit /b 1
 )
-echo Устанавливаю Vosk и sounddevice...
+echo [ECHO] Installing Vosk and sounddevice...
 ".venv\Scripts\python.exe" -m pip install "vosk>=0.3.45,<0.4" "sounddevice>=0.5,<0.6"
 if errorlevel 1 (
-  echo Не удалось установить голосовые библиотеки. Проверь интернет.
-  pause
-  exit /b 1
+    echo [ERROR] Could not install voice dependencies.
+    pause
+    exit /b 1
 )
-echo Скачиваю официальную модель русского языка (около 45 МБ)...
-".venv\Scripts\python.exe" download_voice_model.py
+echo [ECHO] Downloading the Russian Vosk model...
+".venv\Scripts\python.exe" "download_voice_model.py"
+if errorlevel 1 (
+    echo [ERROR] Model download failed. See error above.
+)
 pause
