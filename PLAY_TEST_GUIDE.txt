@@ -1,0 +1,13 @@
+ECHO v2.0 Windows checklist
+
+1. 01_SETUP.bat (Python 3.11 or 3.12)
+2. 02_RUN.bat — main menu
+3. Start game -> WASD / E -> puzzle consoles 1 2 3
+4. Pick scan+hack modules and keycard; unlock A
+5. Solve puzzle C; approach core for color hints in HUD; open N for archive.
+6. Open gate B, exit, continue sectors 2 and 3.
+7. F11 fullscreen; Settings sound/fog; V microphone after 03 model download.
+8. For AI Director watch HUD multiplier and save_data/adaptive_qtable.json after moving through 2+ rooms.
+
+If window closes, read crash_log.txt and provide full text.
+Graphic/fullscreen+voice need verification on your Windows PC; those checks were not available in build environment.

@@ -4,11 +4,12 @@ Game logic (AI, sensor geometry, objectives) lives in world.py for headless test
 import math, sys
 from pathlib import Path
 import pygame
-from .world import World,ROOT,distance,COLORS
+from .world import World,ROOT,distance,COLORS,SOLUTIONS
 from .voice import VoiceListener
 from .storage import Storage
 from .commands import ACTIONS
 from .config import read_settings, save_settings
+from .adaptive import AdaptiveDirector
 
 CFG=read_settings()
 W,H=int(CFG['screen_width']),int(CFG['screen_height'])
@@ -25,16 +26,14 @@ class Game:
         pygame.init()
         try:pygame.display.set_caption('ECHO: Последний сигнал • Атлас-9')
         except Exception:pass
-        flags=0
-        if CFG.get('fullscreen',True):
-            info=pygame.display.Info()
-            W,H=info.current_w,info.current_h
-            flags=pygame.FULLSCREEN
-        else:
-            W,H=int(CFG['screen_width']),int(CFG['screen_height'])
-        VW=max(860,W-HUD_W);VH=H
+        W,H=int(CFG['screen_width']),int(CFG['screen_height'])
+        flags=(pygame.FULLSCREEN|pygame.SCALED) if CFG.get('fullscreen',True) else 0
+        VW=W-HUD_W;VH=H
         PAL=CFG['palette']
-        self.window=pygame.display.set_mode((W,H),flags)
+        try:self.window=pygame.display.set_mode((W,H),flags)
+        except pygame.error:
+            flags=0
+            self.window=pygame.display.set_mode((W,H))
         self.clock=pygame.time.Clock();self.running=True
         self.fullscreen=bool(flags & pygame.FULLSCREEN)
         self.sounds={};self.sound_log_counter=0;self.last_alert_level=0
@@ -45,6 +44,9 @@ class Game:
         self.buttons=[];self.action_open=False;self.map_open=False;self.notes_open=False
         self.message_note='';self.total_score=0;self.game_ending='';self.prev_level=1
         self.hover_object=None
+        self.puzzle_open=None
+        self.director=AdaptiveDirector(ROOT/"save_data"/"adaptive_qtable.json")
+        self.room_key=None
         self.load_art()
         self.load_sounds()
         self.apply_audio_settings()
@@ -81,14 +83,9 @@ class Game:
     def toggle_fullscreen(self):
         global W,H,VW,VH
         self.fullscreen=not self.fullscreen
-        if self.fullscreen:
-            info=pygame.display.Info()
-            W,H=info.current_w,info.current_h
-            self.window=pygame.display.set_mode((W,H),pygame.FULLSCREEN)
-        else:
-            W,H=int(CFG['screen_width']),int(CFG['screen_height'])
-            self.window=pygame.display.set_mode((W,H))
-        VW=max(860,W-HUD_W);VH=H
+        W,H=int(CFG['screen_width']),int(CFG['screen_height'])
+        self.window=pygame.display.set_mode((W,H),(pygame.FULLSCREEN|pygame.SCALED) if self.fullscreen else 0)
+        VW=W-HUD_W;VH=H
     def set_toggle(self,key):
         CFG[key]=not CFG.get(key,False)
         if key=='fullscreen':
@@ -112,7 +109,9 @@ class Game:
             except pygame.error:pass
         try:self.tiles=pygame.image.load(str(ROOT/'assets/tiles/tileset.png')).convert_alpha()
         except pygame.error:self.tiles=None
-        try:self.cover=pygame.image.load(str(ROOT/'assets/ui/cover.png')).convert_alpha()
+        cover_path=ROOT/'assets'/'ui'/'menu_backdrop.png'
+        if not cover_path.exists():cover_path=ROOT/'assets'/'ui'/'cover.png'
+        try:self.cover=pygame.image.load(str(cover_path)).convert_alpha()
         except pygame.error:pass
     def text(self,s,x,y,size=21,tone='text',bold=False,maxw=0,center=False):
         surface=self.font(size,bold).render(str(s),True,color(tone))
@@ -158,10 +157,13 @@ class Game:
             self.world=World(2,abilities=['scan','hack','shield','pulse','control','memory'],inventory={'medkit':2,'battery':2,'keycard':1,'lure':2},challenge=True)
         elif snapshot:
             self.world=World(snapshot['level'],snapshot.get('abilities',[]),stats=snapshot.get('stats'),inventory=snapshot.get('inventory'))
+            self.world.restore(snapshot)
             self.total_score=snapshot.get('total_score',0)
         else:
             self.world=World(1);self.total_score=0;self.storage.clear()
-        self.mode='play';self.action_open=False;self.map_open=False;self.notes_open=False
+        self.mode='play';self.action_open=False;self.map_open=False;self.notes_open=False;self.puzzle_open=None;self.room_key=None
+        self.director=AdaptiveDirector(ROOT/'save_data'/'adaptive_qtable.json')
+        self.world.ai_factor=self.director.current_factor
         self.sound_log_counter=self.world.log_counter;self.last_alert_level=0
         if not challenge:self.save()
     def save(self):
@@ -172,7 +174,7 @@ class Game:
             w=self.world
             self.world=World(w.level,abilities=w.abilities,inventory={'medkit':1,'battery':1,'keycard':0,'lure':0},challenge=w.challenge)
             self.sound_log_counter=self.world.log_counter;self.last_alert_level=0
-            self.mode='play';self.action_open=False
+            self.mode='play';self.action_open=False;self.puzzle_open=None;self.room_key=None
     def next_level(self):
         w=self.world
         if not w:return
@@ -182,7 +184,7 @@ class Game:
             self.mode='menu';return
         if w.level<3:
             self.world=World(w.level+1,abilities=w.abilities,stats=w.stats,inventory={'medkit':max(1,w.inventory['medkit']),'battery':max(1,w.inventory['battery']),'keycard':0,'lure':w.inventory['lure']})
-            self.mode='play';self.sound_log_counter=self.world.log_counter;self.last_alert_level=0;self.save()
+            self.mode='play';self.sound_log_counter=self.world.log_counter;self.last_alert_level=0;self.puzzle_open=None;self.room_key=None;self.save()
         else:
             self.storage.clear();self.mode='credits'
     def handle_click(self,pos):
@@ -201,13 +203,22 @@ class Game:
             if self.action_open:self.action_open=False;return
             if self.map_open:self.map_open=False;return
             if self.notes_open:self.notes_open=False;return
+            if self.puzzle_open:self.puzzle_open=None;return
             if self.mode=='play':self.mode='pause';self.save()
             elif self.mode=='pause':self.mode='play'
             else:self.mode='menu'
             return
         if self.mode=='play':
             w=self.world
-            if evt.key in (pygame.K_e,pygame.K_SPACE):w.interact();return
+            if self.puzzle_open:
+                if evt.key in (pygame.K_1,pygame.K_2,pygame.K_3):
+                    self.answer_puzzle(evt.key-pygame.K_1)
+                return
+            if evt.key in (pygame.K_e,pygame.K_SPACE):
+                obj=w.nearby('puzzle',r=1.9)
+                if obj and obj.get('puzzle_id') not in w.solved_puzzles:
+                    self.puzzle_open=obj['puzzle_id'];return
+                w.interact();return
             if evt.key==pygame.K_TAB:self.action_open=not self.action_open;return
             if evt.key==pygame.K_m:self.map_open=not self.map_open;return
             if evt.key==pygame.K_n:self.notes_open=not self.notes_open;return
@@ -229,21 +240,37 @@ class Game:
         if self.mode=='ending_choice':
             if evt.key==pygame.K_1:self.choose_ending('Свобода')
             if evt.key==pygame.K_2 and 'memory' in self.world.abilities:self.choose_ending('Последний протокол')
+    def answer_puzzle(self,index):
+        if not self.puzzle_open or not self.world:return
+        if self.world.solve_puzzle(self.puzzle_open,index):
+            self.puzzle_open=None;self.save();self.sound('hack')
+        else:self.sound('alarm')
+
     def choose_ending(self,value):
         self.game_ending=value;self.world.ending=value;self.next_level()
     def read_voice(self):
         for tag,payload in self.voice.poll():
-            if tag=='command' and self.world and self.mode=='play':self.world.command(payload,'voice')
+            if tag=='command' and self.world and self.mode=='play' and not self.puzzle_open:self.world.command(payload,'voice')
             elif tag=='notice' and self.world:self.world.message(payload,'info')
             elif tag=='heard' and self.world:self.world.message('РАСПОЗНАНО: '+payload,'voice')
     def tick(self,dt):
         self.read_voice()
         if self.mode!='play' or not self.world:return
-        if self.action_open or self.map_open or self.notes_open:return
+        if self.action_open or self.map_open or self.notes_open or self.puzzle_open:return
         keys=pygame.key.get_pressed()
         dx=int(keys[pygame.K_d] or keys[pygame.K_RIGHT])-int(keys[pygame.K_a] or keys[pygame.K_LEFT])
         dy=int(keys[pygame.K_s] or keys[pygame.K_DOWN])-int(keys[pygame.K_w] or keys[pygame.K_UP])
         self.world.step(dt,dx,dy,bool(keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]))
+        # Adaptive AI decisions are stable during a room and recomputed on room entry.
+        if not self.world.is_portal_tile(int(self.world.player.x),int(self.world.player.y)):
+            new_key=frozenset(self.world.room_tiles())
+            if self.room_key is None:self.room_key=new_key
+            elif self.room_key!=new_key:
+                self.room_key=new_key
+                factor,reason=self.director.advance(self.world.stats,self.world.player.hp,self.world.time)
+                self.world.ai_factor=factor
+                self.world.message(f'AI DIRECTOR: {reason} ({factor:.2f}x)','nova')
+                self.save()
         self.audio_events()
         if self.world.status!='playing':self.mode='result';self.save()
     def audio_events(self):
@@ -273,8 +300,9 @@ class Game:
     def menu(self):
         self.draw_background()
         if self.cover:
-            img=pygame.transform.smoothscale(self.cover,(W,713));self.window.blit(img,(0,0))
-            tint=pygame.Surface((W,H),pygame.SRCALPHA);tint.fill((4,13,24,60));self.window.blit(tint,(0,0))
+            img=pygame.transform.smoothscale(self.cover,(W,H));self.window.blit(img,(0,0))
+            tint=pygame.Surface((W,H),pygame.SRCALPHA);tint.fill((3,12,23,112));self.window.blit(tint,(0,0))
+        pygame.draw.rect(self.window,(7,21,35),(29,266,525,444),border_radius=16)
         self.rect((42,285,500,417),'panel','border',14)
         self.text('АТЛАС-9  /  ЭВАКУАЦИЯ',77,309,17,'accent',True)
         self.paragraph('Ты очнулся на заброшенном военном корабле. Восстанови Нову, избегай охраны и найди спасательную шлюпку.',77,353,425,20,28,'text')
@@ -285,7 +313,7 @@ class Game:
         self.button('НАСТРОЙКИ',(296,574,209,48),lambda:self.set_mode('settings'),small=True)
         self.button('PREMIUM',(73,634,210,44),lambda:self.set_mode('store'),small=True)
         self.button('ВЫХОД',(296,634,209,44),lambda:setattr(self,'running',False),small=True)
-        self.text('v1.0 • Авторские SVG / карты Tiled / Python + Vosk',23,757,15,'muted')
+        self.text('v2.0 • SVG / Tiled / Vosk / Local Q-learning',23,746,14,'muted')
     def set_mode(self,value):self.mode=value
     def world_camera(self):
         p=self.world.player
@@ -304,22 +332,29 @@ class Game:
             for x in range(sx,ex):
                 gid=w.tiles[y*w.width+x]
                 xx=int(x*T-camera[0]);yy=int(y*T-camera[1])
-                base=(25,43,63) if (x+y)%2==0 else (28,47,68)
-                pygame.draw.rect(self.window,base,(xx,yy,T,T))
-                pygame.draw.rect(self.window,(34,58,82),(xx,yy,T,T),1)
+                # Seamless metal floor: subtle broad panels, no pixel-like 48px grid.
+                floor=(22,37,54) if (x//4+y//4)%2 else (25,42,58)
+                pygame.draw.rect(self.window,floor,(xx,yy,T,T))
+                if x%4==0:pygame.draw.line(self.window,(32,57,76),(xx,yy),(xx,yy+T),1)
+                if y%4==0:pygame.draw.line(self.window,(32,57,76),(xx,yy),(xx+T,yy),1)
                 if gid in (2,5):
-                    fill=(61,82,103) if gid==2 else (73,95,116)
-                    pygame.draw.rect(self.window,fill,(xx+2,yy+2,T-4,T-4),border_radius=4)
-                    pygame.draw.rect(self.window,(143,176,202),(xx+3,yy+3,T-6,T-6),2,border_radius=4)
-                    pygame.draw.rect(self.window,(91,114,138),(xx+8,yy+10,T-16,5),border_radius=3)
-                else:
+                    # Shaded wall and hard upper bevel communicates a solid obstruction.
+                    pygame.draw.rect(self.window,(38,58,77),(xx,yy,T,T))
+                    pygame.draw.rect(self.window,(54,80,104),(xx+2,yy+2,T-4,T-4),border_radius=2)
+                    pygame.draw.line(self.window,(125,167,188),(xx+3,yy+3),(xx+T-4,yy+3),3)
+                    pygame.draw.line(self.window,(18,29,44),(xx+T-3,yy+5),(xx+T-3,yy+T-2),3)
+                    pygame.draw.line(self.window,(16,27,42),(xx+5,yy+T-3),(xx+T-3,yy+T-3),3)
+                    if (x+y)%5==0:pygame.draw.circle(self.window,(101,198,206),(xx+9,yy+12),2)
+                elif gid in (3,4,6,7,8):
                     if gid==3:
-                        pygame.draw.circle(self.window,(70,98,126),(xx+T//2,yy+T//2),10,2)
+                        pygame.draw.circle(self.window,(55,100,120),(xx+24,yy+24),10,2)
+                        pygame.draw.circle(self.window,(38,69,93),(xx+24,yy+24),5)
                     elif gid==4:
-                        pygame.draw.rect(self.window,(82,112,138),(xx+12,yy+8,24,32),2,border_radius=2)
-                        for k in range(3):pygame.draw.line(self.window,(110,145,170),(xx+15,yy+14+k*7),(xx+33,yy+14+k*7),2)
-                    elif gid in (6,7,8):
-                        pygame.draw.line(self.window,(88,152,180),(xx+10,yy+24),(xx+38,yy+24),3)
+                        pygame.draw.rect(self.window,(43,74,97),(xx+9,yy+7,30,34),border_radius=4)
+                        pygame.draw.rect(self.window,(86,141,156),(xx+12,yy+10,24,28),2,border_radius=3)
+                        for k in range(3):pygame.draw.line(self.window,(75,125,147),(xx+15,yy+16+k*7),(xx+32,yy+16+k*7),1)
+                    else:
+                        pygame.draw.line(self.window,(49,100,121),(xx+7,yy+24),(xx+41,yy+24),3)
         self.window.set_clip(None)
 
     def draw_fog(self,camera):
@@ -361,9 +396,7 @@ class Game:
                 cast_sector(o['x'],o['y'],angle,o.get('range',7),64,(242,87,108),46,samples=110,outline=(255,157,170))
         for drone in w.drones:
             if w.time>=drone.stunned and (int(drone.x),int(drone.y)) in room:
-                pos=self.px(drone.x,drone.y,camera)
-                pygame.draw.circle(layer,(245,197,95,18),pos,int(min(3.7,drone.vision)*T))
-                pygame.draw.circle(layer,(245,197,95,70),pos,int(min(3.7,drone.vision)*T),1)
+                cast_sector(drone.x,drone.y,0,min(3.7,drone.vision),360,(245,197,95),24,samples=84)
         self.window.blit(layer,(0,0))
 
     def draw_entities(self,camera):
@@ -372,20 +405,21 @@ class Game:
         self.window.set_clip(pygame.Rect(0,0,VW,VH))
         mouse=pygame.mouse.get_pos()
         self.hover_object=None
-        names={'main_terminal':'terminal','aux_terminal':'terminal','broken_terminal':'terminal','exit':'exit','core':'core','module':'module','medkit':'medkit','battery':'battery','keycard':'keycard','lure':'lure','note':'note','camera':'camera','turret':'turret'}
+        names={'main_terminal':'terminal','aux_terminal':'terminal','broken_terminal':'terminal','exit':'exit','core':'core','module':'module','medkit':'medkit','battery':'battery','keycard':'keycard','lure':'lure','note':'note','camera':'camera','turret':'turret','puzzle':'puzzle'}
         marker_colors={
-            'module':'good','medkit':'bad','battery':'accent','keycard':'gold','lure':'gold','note':'muted',
+            'module':'good','medkit':'bad','battery':'accent','keycard':'gold','lure':'gold','note':'muted','puzzle':'accent',
             'main_terminal':'accent','aux_terminal':'accent','core':'gold','exit':'good','camera':'bad','turret':'bad'
         }
         marker_labels={
             'module':'МОДУЛЬ','medkit':'АПТЕЧКА','battery':'БАТАРЕЯ','keycard':'КЛЮЧ','lure':'МАЯК',
             'note':'ЗАПИСЬ','main_terminal':'ТЕРМИНАЛ','aux_terminal':'КОНСОЛЬ','core':'ЯДРО','exit':'ВЫХОД',
-            'camera':'КАМЕРА','turret':'ТУРЕЛЬ'
+            'camera':'КАМЕРА','turret':'ТУРЕЛЬ','puzzle':'ЗАГАДКА'
         }
         for o in w.objects:
             if o['taken'] or o['type']=='spawn':continue
             if (int(o['x']),int(o['y'])) not in room:continue
             typ=o['type'];sx,sy=self.px(o['x'],o['y'],camera)
+            if typ=='puzzle' and o.get('puzzle_id') in w.solved_puzzles:continue
             if not (-50<sx<VW+50 and -50<sy<VH+50):continue
             if typ=='gate':
                 if w.gates[o['gate_id']]:
@@ -475,23 +509,32 @@ class Game:
         self.bar('ЗДОРОВЬЕ',w.player.hp,x+10,118,pw-24,'bad')
         self.bar('ЭНЕРГИЯ НОВЫ',w.player.energy,x+10,170,pw-24,'accent')
         self.bar('ТРЕВОГА',w.alert,x+10,222,pw-24,'gold')
-        self.text('ТЕКУЩАЯ ЦЕЛЬ',x+10,280,14,'accent',True)
-        self.rect((x+9,304,pw-18,94),'panel','border',10)
-        self.paragraph(w.mission,x+22,319,pw-45,17,22,'text',4)
-        self.text('МОДУЛИ НОВЫ',x+10,421,14,'accent',True)
+        near_core=w.nearby('core',r=3.7) is not None
+        self.text('СХЕМА ЯДЕР' if near_core else 'ТЕКУЩАЯ ЦЕЛЬ',x+10,275,14,'accent',True)
+        self.rect((x+9,300,pw-18,119 if near_core else 88),'panel','border',10)
+        if near_core:
+            self.text('ПОДСКАЗКА СТАНЦИИ',x+20,309,14,'gold',True)
+            self.paragraph(w.clue,x+18,329,pw-44,14,18,'text',4)
+            off,on=SOLUTIONS[w.level]
+            self.text('ОТКЛ.: '+COLORS[off],x+17,391,12,'bad',True)
+            self.text('ВКЛ.: '+COLORS[on],x+172,391,12,'good',True)
+            tag='ИНЖЕНЕРНАЯ СХЕМА: '+w.clue
+            if tag not in w.history:w.history.append(tag)
+        else:
+            self.paragraph(w.mission,x+20,316,pw-43,16,21,'text',3)
+        self.text('МОДУЛИ НОВЫ',x+10,431,14,'accent',True)
         descriptions={'scan':'СКАН','hack':'ВЗЛОМ','shield':'ЩИТ','pulse':'ИМПУЛЬС','control':'УПРАВЛ.','memory':'ПАМЯТЬ'}
         cell_w=(pw-28)//3
         for i,(a,label) in enumerate(descriptions.items()):
-            rx=x+10+(i%3)*(cell_w+4);ry=447+(i//3)*42
+            rx=x+10+(i%3)*(cell_w+4);ry=454+(i//3)*39
             self.rect((rx,ry,cell_w,32),'panel_soft' if a in w.abilities else 'background','good' if a in w.abilities else 'border',8)
             self.text(label,rx+cell_w//2,ry+8,12,'good' if a in w.abilities else 'muted',True,center=True)
-        self.text('ИНВЕНТАРЬ',x+10,541,14,'accent',True)
-        self.text(f"[H] Аптечка: {w.inventory['medkit']}",x+12,566,17)
-        self.text(f"[B] Батарея: {w.inventory['battery']}",x+12,593,17)
-        self.text(f"[G] Маяк: {w.inventory['lure']}",x+12,620,16)
-        self.text(f"Ключ-карта: {w.inventory['keycard']}",x+140,620,16)
+        self.text('ИНВЕНТАРЬ',x+10,537,13,'accent',True)
+        self.text(f"H  Аптечка {w.inventory['medkit']}     B  Батарея {w.inventory['battery']}",x+12,558,15)
+        self.text(f"G  Маяк {w.inventory['lure']}         Ключ-карта {w.inventory['keycard']}",x+12,583,15)
+        self.text(f"ЛОГИКА: {len(w.solved_puzzles)}/3   AI: {w.ai_factor:.2f}x",x+12,608,14,'good' if len(w.solved_puzzles)==3 else 'gold',True)
         info_y=VH-140
-        self.text(f'ОЧКИ  {w.score+self.total_score:06d}',x+10,info_y,20,'gold',True)
+        self.text(f'ОЧКИ  {w.score+self.total_score:06d}',x+10,info_y,17,'gold',True)
         self.text(f'ВРЕМЯ  {int(w.time)//60:02d}:{int(w.time)%60:02d}',x+10,info_y+28,17,'muted')
         btn_y=VH-104
         self.button('КОМАНДЫ [TAB]',(x+10,btn_y,pw-20,30),lambda:setattr(self,'action_open',not self.action_open),small=True)
@@ -556,6 +599,22 @@ class Game:
     def select_action(self,command):
         self.world.command(command)
         self.action_open=False
+    def puzzle_panel(self):
+        p=self.world.puzzles.get(self.puzzle_open)
+        if not p:return
+        overlay=pygame.Surface((VW,VH),pygame.SRCALPHA)
+        overlay.fill((1,7,15,198))
+        self.window.blit(overlay,(0,0))
+        bx=max(36,VW//2-405);by=max(35,VH//2-276);bw=min(810,VW-72)
+        self.rect((bx,by,bw,552),'panel','accent',17)
+        self.text('ТЕРМИНАЛ  /  '+p['type'].upper(),bx+28,by+25,15,'accent',True)
+        self.text(p['title'],bx+28,by+61,29,'text',True,maxw=bw-60)
+        self.rect((bx+24,by+108,bw-48,132),'panel_alt','border',10)
+        self.paragraph(p['question'],bx+38,by+124,bw-80,18,28,'text',4)
+        for i,opt in enumerate(p['options']):
+            self.button(f'{i+1}    {opt}',(bx+30,by+262+i*61,bw-60,50),lambda j=i:self.answer_puzzle(j),small=True)
+        self.text('Выбор: клавиши 1, 2, 3 или мышь. Esc — выйти.',bx+30,by+502,15,'muted')
+
     def play(self):
         self.window.fill((7,16,27))
         camera=self.world_camera()
@@ -571,6 +630,7 @@ class Game:
             self.mini_map(VW//2-140,123,7)
         if self.notes_open:self.notes_panel()
         if self.action_open:self.action_menu()
+        if self.puzzle_open:self.puzzle_panel()
     def panel_base(self,title,subtitle=''):
         self.draw_background();self.text('ECHO',W//2,42,63,'accent',True,center=True)
         self.text(title,W//2,140,31,'text',True,center=True)
@@ -594,7 +654,8 @@ class Game:
             'Энергетическое ядро: Сканируй → Отключи нужный контур → Активируй другой → Открой.',
             'Камеры вызывают турели. Дроны преследуют и атакуют. Прячься за стенами.',
             'Щит скрывает от сканеров 7 секунд; импульс оглушает ближайших дронов на 5 секунд.',
-            'Редактирование: карты — Tiled (*.tmj), персонажи — Inkscape (*.svg), диалоги — JSON.'
+            'Логические терминалы: E — открыть, 1–3 — выбрать ответ. Для шлюзов A/B нужны задания.',
+            'Редактирование: карты — Tiled (*.tmj), персонажи — Inkscape (*.svg), сценарии — JSON.'
         ]
         y=237
         for line in info:

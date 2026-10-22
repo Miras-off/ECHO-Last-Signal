@@ -6,7 +6,7 @@
   "tileheight": 48,
   "tilewidth": 48,
   "nextlayerid": 3,
-  "nextobjectid": 32,
+  "nextobjectid": 35,
   "orientation": "orthogonal",
   "renderorder": "right-down",
   "tiledversion": "1.11.0",
@@ -1689,6 +1689,63 @@
               "name": "id",
               "type": "string",
               "value": "D1-1"
+            }
+          ]
+        },
+        {
+          "id": 32,
+          "name": "Логический терминал: Медицинский архив",
+          "type": "puzzle",
+          "x": 264.0,
+          "y": 1080.0,
+          "width": 0,
+          "height": 0,
+          "rotation": 0,
+          "visible": true,
+          "point": true,
+          "properties": [
+            {
+              "name": "puzzle_id",
+              "type": "string",
+              "value": "1A"
+            }
+          ]
+        },
+        {
+          "id": 33,
+          "name": "Логический терминал: Протокол карантина",
+          "type": "puzzle",
+          "x": 312.0,
+          "y": 312.0,
+          "width": 0,
+          "height": 0,
+          "rotation": 0,
+          "visible": true,
+          "point": true,
+          "properties": [
+            {
+              "name": "puzzle_id",
+              "type": "string",
+              "value": "1B"
+            }
+          ]
+        },
+        {
+          "id": 34,
+          "name": "Логический терминал: Схема спасательного контура",
+          "type": "puzzle",
+          "x": 888.0,
+          "y": 312.0,
+          "width": 0,
+          "height": 0,
+          "rotation": 0,
+          "visible": true,
+          "point": true,
+          "properties": [
+            {
+              "name": "puzzle_id",
+              "type": "string",
+              "value": "1C"
             }
           ]
         }

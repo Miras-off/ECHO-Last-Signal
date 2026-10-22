@@ -6,7 +6,7 @@
   "tileheight": 48,
   "tilewidth": 48,
   "nextlayerid": 3,
-  "nextobjectid": 63,
+  "nextobjectid": 66,
   "orientation": "orthogonal",
   "renderorder": "right-down",
   "tiledversion": "1.11.0",
@@ -1723,6 +1723,63 @@
               "name": "id",
               "type": "string",
               "value": "D2-2"
+            }
+          ]
+        },
+        {
+          "id": 63,
+          "name": "Логический терминал: Сломанная маршрутизация",
+          "type": "puzzle",
+          "x": 264.0,
+          "y": 1080.0,
+          "width": 0,
+          "height": 0,
+          "rotation": 0,
+          "visible": true,
+          "point": true,
+          "properties": [
+            {
+              "name": "puzzle_id",
+              "type": "string",
+              "value": "2A"
+            }
+          ]
+        },
+        {
+          "id": 64,
+          "name": "Логический терминал: Поддельные терминалы",
+          "type": "puzzle",
+          "x": 312.0,
+          "y": 312.0,
+          "width": 0,
+          "height": 0,
+          "rotation": 0,
+          "visible": true,
+          "point": true,
+          "properties": [
+            {
+              "name": "puzzle_id",
+              "type": "string",
+              "value": "2B"
+            }
+          ]
+        },
+        {
+          "id": 65,
+          "name": "Логический терминал: Вентиляционный контур",
+          "type": "puzzle",
+          "x": 888.0,
+          "y": 264.0,
+          "width": 0,
+          "height": 0,
+          "rotation": 0,
+          "visible": true,
+          "point": true,
+          "properties": [
+            {
+              "name": "puzzle_id",
+              "type": "string",
+              "value": "2C"
             }
           ]
         }

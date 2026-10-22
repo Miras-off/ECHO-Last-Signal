@@ -75,6 +75,9 @@ class World:
         self.level_end='';self.ending='';self.shield_until=0.0;self.cam_disable_until=0.0
         self.terminal_stage=0;self.core_stage=0;self.gates={'A':False,'B':False}
         self.history=[];self.log=[];self.log_counter=0;self.camera_suspicion={}
+        self.ai_factor=1.0
+        self.puzzles={p['id']:p for p in json.loads((ROOT/'story'/'puzzles.json').read_text(encoding='utf-8')).get(str(level),[])}
+        self.solved_puzzles=set()
         self.last_damage=-10.0;self.last_detect=-10.0;self.last_hint=-10.0
         self.lure_pos=None;self.lure_until=0.0
         self.drones=[]
@@ -85,6 +88,19 @@ class World:
     def message(self,text,kind='info'):
         self.log_counter+=1
         self.log.append((self.time,text,kind));self.log=self.log[-8:]
+    def solve_puzzle(self,puzzle_id,choice):
+        p=self.puzzles.get(str(puzzle_id))
+        if not p or puzzle_id in self.solved_puzzles:return False
+        if choice!=p['answer']:
+            self.fail('Неверное решение терминала. Система активирует тревогу.')
+            return False
+        self.solved_puzzles.add(puzzle_id)
+        self.history.append(f"{p['title']}: {p['explain']}")
+        if p.get('reward')=='medkit':self.inventory['medkit']+=1
+        if p.get('reward')=='battery':self.inventory['battery']+=1
+        self.success(f"Решение принято: {p['title']}. {p['explain']}",140)
+        return True
+
     def nearby(self,typ=None,r=1.5):
         opts=[o for o in self.objects if not o['taken'] and (typ is None or o['type']==typ) and distance((self.player.x,self.player.y),(o['x'],o['y']))<=r]
         return min(opts,key=lambda z:distance((self.player.x,self.player.y),(z['x'],z['y']))) if opts else None
@@ -168,9 +184,8 @@ class World:
         result.reverse();return result
     @property
     def difficulty(self):
-        if self.stats['detections']>=4 or self.stats['damage']>=75 or self.stats['errors']>=4 or self.player.hp<35:return .72
-        if self.time>45 and self.stats['detections']==0 and self.player.hp>75:return 1.18
-        return 1.0
+        base=.72 if (self.stats['detections']>=4 or self.stats['damage']>=75 or self.stats['errors']>=4 or self.player.hp<35) else 1.18 if (self.time>45 and self.stats['detections']==0 and self.player.hp>75) else 1.0
+        return clamp(base*self.ai_factor,.65,1.35)
     @property
     def shielded(self):return self.time<self.shield_until
     @property
@@ -178,11 +193,15 @@ class World:
     @property
     def mission(self):
         if self.terminal_stage<4:
+            if sum(pid in self.solved_puzzles for pid in self.puzzles if pid.endswith(('A','B')))<2:
+                return 'Найди и реши два логических терминала в первом отсеке.'
             if 'scan' not in self.abilities:return 'Найди модуль сканирования.'
             if 'hack' not in self.abilities:return 'Найди модуль взлома.'
             if self.inventory['keycard']==0:return 'Найди карту доступа.'
             return ['Подключись к главному терминалу.','Сканируй терминал.','Взломай защиту терминала.','Открой первый шлюз.'][self.terminal_stage]
         if self.core_stage<4:
+            if any(pid not in self.solved_puzzles for pid in self.puzzles):
+                return 'Реши все три головоломки сектора, затем настрой ядро.'
             return ['Найди энергетическое ядро в центральном секторе.','Отключи нужное ядро согласно подсказке.','Активируй нужное ядро согласно подсказке.','Открой второй шлюз.'][self.core_stage]
         return 'Доберись до спасательного перехода.' if self.level<3 else 'Доберись до шлюпки «Аврора».'
     def damage(self,value,reason):
@@ -254,9 +273,13 @@ class World:
             return self.fail('Сначала: подключение → сканирование → взлом.')
         if cmd=='open':
             if near_main and self.terminal_stage==3:
+                if any(pid.endswith(('A','B')) and pid not in self.solved_puzzles for pid in self.puzzles):
+                    return self.fail('Доступ закрыт. Реши два логических терминала первого отсека.')
                 if self.inventory['keycard']==0:return self.fail('Нужна карта персонала.')
                 self.gates['A']=True;self.terminal_stage=4;return self.success('Шлюз A открыт! Доступ к ядру разрешён.',190)
             if near_core and self.core_stage==3:
+                if any(pid not in self.solved_puzzles for pid in self.puzzles):
+                    return self.fail('Не все логические задания сектора решены.')
                 if self.level==3 and 'control' not in self.abilities:return self.fail('Нужен модуль управления кораблём.')
                 self.gates['B']=True;self.core_stage=4;return self.success('Шлюз B открыт. Выход доступен.',210)
             if near_main or near_core:return self.fail('Сначала выполни все действия на панели.')
@@ -309,7 +332,10 @@ class World:
                 self.status='won';self.score+=max(100,500-int(self.time));self.level_end='escape'
                 self.message('НОВА: Путь свободен. Сектор пройден!','success');return True
             if obj['type']=='main_terminal':self.message('ТЕРМИНАЛ: '+self.mission,'info');return True
-            if obj['type']=='core':self.message('ПОДСКАЗКА: '+self.clue,'nova');return True
+            if obj['type']=='core':
+                hint='ИНЖЕНЕРНАЯ СХЕМА: '+self.clue
+                if hint not in self.history:self.history.append(hint)
+                self.message('ПОДСКАЗКА: '+self.clue,'nova');return True
             if obj['type']=='broken_terminal':self.message('Разбитый терминал. Питание отключено. Это тупик.','warning');return True
             if obj['type']=='aux_terminal':self.message('Вспомогательная сеть камер. Команда: «Подключение».','info');return True
         self.message('НОВА: Здесь нет предметов для взаимодействия.','info');return False
@@ -395,4 +421,17 @@ class World:
                     self.damage(12,'Выстрел турели')
         if self.challenge and self.alert<20:self.alert+=dt*.25
     def snapshot(self):
-        return {'level':self.level,'abilities':sorted(self.abilities),'inventory':self.inventory,'stats':self.stats,'score':self.score,'time':round(self.time,2),'health':round(self.player.hp),'challenge':self.challenge}
+        return {'level':self.level,'abilities':sorted(self.abilities),'inventory':self.inventory,'stats':self.stats,'score':self.score,'time':round(self.time,2),'health':round(self.player.hp),'energy':round(self.player.energy),'position':[self.player.x,self.player.y], 'terminal_stage':self.terminal_stage,'core_stage':self.core_stage,'gates':self.gates,'solved_puzzles':sorted(self.solved_puzzles),'history':self.history,'taken_ids':[o['id'] for o in self.objects if o['taken']],'challenge':self.challenge}
+    def restore(self,snap):
+        self.player.x,self.player.y=map(float,snap.get('position',[self.player.x,self.player.y]))
+        self.player.hp=float(snap.get('health',100))
+        self.player.energy=float(snap.get('energy',100))
+        self.terminal_stage=int(snap.get('terminal_stage',0))
+        self.core_stage=int(snap.get('core_stage',0))
+        self.gates.update(snap.get('gates',{}))
+        self.solved_puzzles=set(snap.get('solved_puzzles',[]))
+        self.history=list(snap.get('history',[]))
+        self.score=int(snap.get('score',0))
+        self.time=float(snap.get('time',0))
+        taken=set(map(str,snap.get('taken_ids',[])))
+        for obj in self.objects:obj['taken']=str(obj['id']) in taken

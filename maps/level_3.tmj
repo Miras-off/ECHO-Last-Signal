@@ -6,7 +6,7 @@
   "tileheight": 48,
   "tilewidth": 48,
   "nextlayerid": 3,
-  "nextobjectid": 94,
+  "nextobjectid": 97,
   "orientation": "orthogonal",
   "renderorder": "right-down",
   "tiledversion": "1.11.0",
@@ -1723,6 +1723,63 @@
               "name": "id",
               "type": "string",
               "value": "D3-2"
+            }
+          ]
+        },
+        {
+          "id": 94,
+          "name": "Логический терминал: Фрагменты кода ЦЕРБЕРА",
+          "type": "puzzle",
+          "x": 216.0,
+          "y": 1080.0,
+          "width": 0,
+          "height": 0,
+          "rotation": 0,
+          "visible": true,
+          "point": true,
+          "properties": [
+            {
+              "name": "puzzle_id",
+              "type": "string",
+              "value": "3A"
+            }
+          ]
+        },
+        {
+          "id": 95,
+          "name": "Логический терминал: Анализ директивы",
+          "type": "puzzle",
+          "x": 312.0,
+          "y": 312.0,
+          "width": 0,
+          "height": 0,
+          "rotation": 0,
+          "visible": true,
+          "point": true,
+          "properties": [
+            {
+              "name": "puzzle_id",
+              "type": "string",
+              "value": "3B"
+            }
+          ]
+        },
+        {
+          "id": 96,
+          "name": "Логический терминал: Доступ к спасательному ангару",
+          "type": "puzzle",
+          "x": 984.0,
+          "y": 360.0,
+          "width": 0,
+          "height": 0,
+          "rotation": 0,
+          "visible": true,
+          "point": true,
+          "properties": [
+            {
+              "name": "puzzle_id",
+              "type": "string",
+              "value": "3C"
             }
           ]
         }

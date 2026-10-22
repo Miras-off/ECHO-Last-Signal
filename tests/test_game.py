@@ -15,10 +15,14 @@ class GameTests(unittest.TestCase):
     def pick(self,kind,world=None,**kwargs):
         w=world or self.w;o=self.jump(kind,w,**kwargs);self.assertTrue(w.interact());return o
     def progress_terminal(self,w):
+        for pid,puzzle in w.puzzles.items():
+            if pid.endswith(('A','B')):self.assertTrue(w.solve_puzzle(pid,puzzle['answer']))
         self.jump('main_terminal',w)
         for name in ('connect','scan','hack','open'):self.assertTrue(w.command(name),name)
         self.assertTrue(w.gates['A']);self.assertEqual(w.terminal_stage,4)
     def progress_core(self,w):
+        for pid,puzzle in w.puzzles.items():
+            if pid not in w.solved_puzzles:self.assertTrue(w.solve_puzzle(pid,puzzle['answer']))
         self.jump('core',w)
         a,b=SOLUTIONS[w.level]
         for name in ('scan','off_'+a,'on_'+b,'open'):self.assertTrue(w.command(name),name)
