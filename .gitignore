@@ -1,9 +1,42 @@
+# Environments, caches, build products
 .venv/
+venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Credentials and local config
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Runtime, personal saves, and ML weights
 models/vosk-model-*/
 models/*.zip
 save_data/*.sqlite3
+save_data/*.sqlite3-*
+save_data/*.sqlite
+save_data/*.db
+save_data/*.json
+save_data/*.log
 crash_log.txt
-.DS_Store
+*.log
+
+# Temporary exports
+*.tmp
+*.bak

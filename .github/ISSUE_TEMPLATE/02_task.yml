@@ -1,0 +1,26 @@
+name: Project task
+about: Track a real implementation, testing, or documentation task
+body:
+  - type: input
+    id: title
+    attributes:
+      label: Outcome
+      description: What observable result will this task produce?
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      placeholder: "- [ ] ...\n- [ ] ..."
+    validations:
+      required: true
+  - type: input
+    id: laboratory
+    attributes:
+      label: Lab number (8–15)
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Verification / evidence
+      description: Link test report, PR, screenshots, or actual user-testing notes.
