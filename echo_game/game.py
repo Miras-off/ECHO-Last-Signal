@@ -13,10 +13,10 @@ from .adaptive import AdaptiveDirector
 
 CFG=read_settings()
 W,H=int(CFG['screen_width']),int(CFG['screen_height'])
-HUD_W=344
+HUD_W=360
 VW=W-HUD_W
 VH=H
-T=48
+T=int(CFG.get('tile_pixels',64))
 PAL=CFG['palette']
 def color(key):return pygame.Color(PAL.get(key,key))
 
@@ -38,6 +38,11 @@ class Game:
         self.fullscreen=bool(flags & pygame.FULLSCREEN)
         self.sounds={};self.sound_log_counter=0;self.last_alert_level=0
         self.fonts={}
+        self.glow_cache={}
+        self.ring_cache={}
+        self.image_cache={}
+        self.text_cache={}
+        self.combat_layer=pygame.Surface((VW,VH),pygame.SRCALPHA)
         self.mode='menu';self.world=None
         self.storage=Storage();self.voice=VoiceListener()
         self.assets={};self.cover=None;self.tiles=None
@@ -114,10 +119,14 @@ class Game:
         try:self.cover=pygame.image.load(str(cover_path)).convert_alpha()
         except pygame.error:pass
     def text(self,s,x,y,size=21,tone='text',bold=False,maxw=0,center=False):
-        surface=self.font(size,bold).render(str(s),True,color(tone))
+        value=str(s);key=(value,size,tone,bool(bold));surface=self.text_cache.get(key)
+        if surface is None:
+            surface=self.font(size,bold).render(value,True,color(tone))
         if maxw and surface.get_width()>maxw:
             while size>11 and surface.get_width()>maxw:
-                size-=1;surface=self.font(size,bold).render(str(s),True,color(tone))
+                size-=1;surface=self.font(size,bold).render(value,True,color(tone))
+        if len(self.text_cache)>768:self.text_cache.clear()
+        self.text_cache[key]=surface
         target=(x-surface.get_width()//2 if center else x,y)
         self.window.blit(surface,target)
         return surface.get_width()
@@ -137,6 +146,49 @@ class Game:
     def rect(self,r,fill='panel',edge=None,rad=9,width=0):
         pygame.draw.rect(self.window,color(fill),r,border_radius=rad)
         if edge:pygame.draw.rect(self.window,color(edge),r,width or 1,border_radius=rad)
+    def glow(self,position,radius,tone,alpha=42):
+        """Soft additive glow used by practical lights and interactive objects."""
+        key=(int(radius),tone,int(alpha));layer=self.glow_cache.get(key)
+        if layer is None:
+            rgb=color(tone)[:3]
+            size=max(8,int(radius*2.4));layer=pygame.Surface((size,size),pygame.SRCALPHA)
+            center=size//2
+            for step in range(7,0,-1):
+                rr=int(radius*step/7)
+                pygame.draw.circle(layer,(*rgb,max(1,int(alpha*(1-step/8)**1.6))),(center,center),rr)
+            self.glow_cache[key]=layer
+        center=layer.get_width()//2
+        self.window.blit(layer,(int(position[0]-center),int(position[1]-center)))
+    def smooth_ring(self,position,radius,tone,alpha=185,width=1.5):
+        """Draw a cached supersampled ring with a soft edge and stable geometry."""
+        radius=round(max(2,float(radius))*4)/4;width=max(.75,float(width))
+        key=(radius,tone,round(width,2));layer=self.ring_cache.get(key)
+        if layer is None:
+            rgb=color(tone)[:3]
+            scale=4;pad=5
+            side=max(13,int(math.ceil(radius+pad))*2+1)
+            high=pygame.Surface((side*scale,side*scale),pygame.SRCALPHA)
+            center=(high.get_width()//2,high.get_height()//2)
+            rr=int(round(radius*scale));stroke=max(scale,int(round(width*scale)))
+            pygame.draw.circle(high,(*rgb,34),center,rr+scale,stroke+scale*2)
+            pygame.draw.circle(high,(*rgb,238),center,rr,stroke)
+            layer=pygame.transform.smoothscale(high,(side,side))
+            self.ring_cache[key]=layer
+        layer.set_alpha(max(0,min(255,int(alpha))))
+        self.window.blit(layer,(int(round(position[0]-layer.get_width()/2)),int(round(position[1]-layer.get_height()/2))))
+    def animated_ring(self,position,base_radius,tone,clock,phase=0,width=1.35,hover=False,travel=2.25):
+        """Breathing marker ring with a clearly visible rotating highlight."""
+        wave=.5+.5*math.sin(clock*math.tau*.72+phase)
+        radius=float(base_radius)+float(travel)*wave
+        self.smooth_ring(position,radius,tone,255 if hover else 118+int(112*wave),2 if hover else width)
+        angle=clock*2.75+phase
+        rgb=color(tone)[:3]
+        highlight=tuple(min(255,int(channel*.55+145)) for channel in rgb)
+        points=[]
+        for step in range(9):
+            point_angle=angle+step*.065
+            points.append((position[0]+math.cos(point_angle)*radius,position[1]+math.sin(point_angle)*radius))
+        pygame.draw.aalines(self.window,highlight,False,points)
     def button(self,title,rect,callback,filled=False,disabled=False,small=False):
         x,y,w,h=rect;mouse=pygame.mouse.get_pos();hover=pygame.Rect(rect).collidepoint(mouse)
         fill='panel_alt' if not filled else 'accent'
@@ -148,8 +200,11 @@ class Game:
         img=self.assets.get(name)
         if not img:return
         if height is None:height=width
-        frame=pygame.transform.smoothscale(img,(int(width),int(height)))
-        if flip:frame=pygame.transform.flip(frame,True,False)
+        key=(name,int(width),int(height),bool(flip));frame=self.image_cache.get(key)
+        if frame is None:
+            frame=pygame.transform.smoothscale(img,(int(width),int(height)))
+            if flip:frame=pygame.transform.flip(frame,True,False)
+            self.image_cache[key]=frame
         self.window.blit(frame,(int(cx-width/2),int(cy-height/2)))
     def start(self,resume=False,challenge=False):
         snapshot=self.storage.load() if resume else None
@@ -302,6 +357,9 @@ class Game:
         if self.cover:
             img=pygame.transform.smoothscale(self.cover,(W,H));self.window.blit(img,(0,0))
             tint=pygame.Surface((W,H),pygame.SRCALPHA);tint.fill((3,12,23,112));self.window.blit(tint,(0,0))
+        self.text('E C H O',W-340,45,54,'text',True,center=True)
+        self.text('ПОСЛЕДНИЙ СИГНАЛ',W-340,108,15,'accent',True,center=True)
+        pygame.draw.line(self.window,color('accent'),(W-505,137),(W-175,137),2)
         pygame.draw.rect(self.window,(7,21,35),(29,266,525,444),border_radius=16)
         self.rect((42,285,500,417),'panel','border',14)
         self.text('АТЛАС-9  /  ЭВАКУАЦИЯ',77,309,17,'accent',True)
@@ -313,7 +371,7 @@ class Game:
         self.button('НАСТРОЙКИ',(296,574,209,48),lambda:self.set_mode('settings'),small=True)
         self.button('PREMIUM',(73,634,210,44),lambda:self.set_mode('store'),small=True)
         self.button('ВЫХОД',(296,634,209,44),lambda:setattr(self,'running',False),small=True)
-        self.text('v2.0 • SVG / Tiled / Vosk / Local Q-learning',23,746,14,'muted')
+        self.text('v2.1 • CINEMATIC ART / Tiled / Vosk / Local Q-learning',23,746,14,'muted')
     def set_mode(self,value):self.mode=value
     def world_camera(self):
         p=self.world.player
@@ -332,19 +390,33 @@ class Game:
             for x in range(sx,ex):
                 gid=w.tiles[y*w.width+x]
                 xx=int(x*T-camera[0]);yy=int(y*T-camera[1])
-                # Seamless metal floor: subtle broad panels, no pixel-like 48px grid.
-                floor=(22,37,54) if (x//4+y//4)%2 else (25,42,58)
+                # Broad, layered deck plates: details are smaller than a logical tile,
+                # which removes the old board-game grid look without changing physics.
+                floor=(20,31,45) if (x//4+y//3)%2 else (24,38,53)
                 pygame.draw.rect(self.window,floor,(xx,yy,T,T))
-                if x%4==0:pygame.draw.line(self.window,(32,57,76),(xx,yy),(xx,yy+T),1)
-                if y%4==0:pygame.draw.line(self.window,(32,57,76),(xx,yy),(xx+T,yy),1)
+                pygame.draw.line(self.window,(42,62,78),(xx,yy),(xx+T,yy),1)
+                pygame.draw.line(self.window,(10,19,29),(xx,yy+T-1),(xx+T,yy+T-1),1)
+                if (x*17+y*31)%11==0:
+                    pygame.draw.line(self.window,(47,68,82),(xx+8,yy+13),(xx+39,yy+13),1)
+                    pygame.draw.circle(self.window,(8,15,23),(xx+9,yy+38),2)
+                    pygame.draw.circle(self.window,(66,83,94),(xx+39,yy+38),1)
+                if x%4==0:pygame.draw.line(self.window,(55,76,91),(xx,yy+4),(xx,yy+T-4),2)
+                if y%3==0:pygame.draw.line(self.window,(49,69,86),(xx+4,yy),(xx+T-4,yy),2)
                 if gid in (2,5):
-                    # Shaded wall and hard upper bevel communicates a solid obstruction.
-                    pygame.draw.rect(self.window,(38,58,77),(xx,yy,T,T))
-                    pygame.draw.rect(self.window,(54,80,104),(xx+2,yy+2,T-4,T-4),border_radius=2)
-                    pygame.draw.line(self.window,(125,167,188),(xx+3,yy+3),(xx+T-4,yy+3),3)
-                    pygame.draw.line(self.window,(18,29,44),(xx+T-3,yy+5),(xx+T-3,yy+T-2),3)
-                    pygame.draw.line(self.window,(16,27,42),(xx+5,yy+T-3),(xx+T-3,yy+T-3),3)
-                    if (x+y)%5==0:pygame.draw.circle(self.window,(101,198,206),(xx+9,yy+12),2)
+                    # Thick bulkhead with crown, inset machinery and a cast lower shadow.
+                    pygame.draw.rect(self.window,(7,13,21),(xx+4,yy+7,T,T),border_radius=5)
+                    pygame.draw.rect(self.window,(31,45,59),(xx,yy,T,T),border_radius=4)
+                    pygame.draw.polygon(self.window,(67,88,104),[(xx+3,yy+4),(xx+T-3,yy+4),(xx+T-9,yy+12),(xx+9,yy+12)])
+                    pygame.draw.rect(self.window,(19,30,43),(xx+7,yy+15,T-14,T-22),border_radius=3)
+                    pygame.draw.rect(self.window,(49,68,83),(xx+10,yy+18,T-20,T-29),2,border_radius=2)
+                    pygame.draw.line(self.window,(9,16,25),(xx+3,yy+T-4),(xx+T-3,yy+T-4),5)
+                    if (x*5+y)%4==0:
+                        lamp='bad' if (x+y)%9==0 else 'accent'
+                        pygame.draw.rect(self.window,color(lamp),(xx+17,yy+8,14,3),border_radius=2)
+                        self.glow((xx+24,yy+10),24,lamp,24)
+                    else:
+                        pygame.draw.circle(self.window,(93,111,122),(xx+9,yy+9),2)
+                        pygame.draw.circle(self.window,(7,13,21),(xx+39,yy+9),2)
                 elif gid in (3,4,6,7,8):
                     if gid==3:
                         pygame.draw.circle(self.window,(55,100,120),(xx+24,yy+24),10,2)
@@ -355,6 +427,48 @@ class Game:
                         for k in range(3):pygame.draw.line(self.window,(75,125,147),(xx+15,yy+16+k*7),(xx+32,yy+16+k*7),1)
                     else:
                         pygame.draw.line(self.window,(49,100,121),(xx+7,yy+24),(xx+41,yy+24),3)
+        self.window.set_clip(None)
+
+    def draw_environment_details(self,camera):
+        """Non-colliding set dressing derived deterministically from map geometry."""
+        w=self.world;room=w.room_view_tiles();self.window.set_clip(pygame.Rect(0,0,VW,VH))
+        for gx,gy in room:
+            if not w.is_walkable_tile(gx,gy):continue
+            sx,sy=self.px(gx+.5,gy+.5,camera)
+            seed=(gx*92821+gy*68917+w.level*101)%97
+            # Wall-mounted consoles, pipe runs and hazard markings.
+            adjacent=not w.is_walkable_tile(gx,gy-1)
+            if adjacent and seed in (2,7,13,31):
+                pygame.draw.rect(self.window,(5,10,17),(sx-22,sy-21,44,13),border_radius=3)
+                pygame.draw.rect(self.window,(42,65,78),(sx-20,sy-20,40,10),border_radius=2)
+                screen='bad' if seed==31 else 'accent'
+                pygame.draw.rect(self.window,color(screen),(sx-13,sy-17,20,4),border_radius=2)
+                pygame.draw.line(self.window,(116,129,130),(sx+12,sy-17),(sx+17,sy-17),2)
+                self.glow((sx-3,sy-16),28,screen,22)
+            elif adjacent and seed in (43,59):
+                pygame.draw.line(self.window,(9,13,18),(sx-20,sy-18),(sx+21,sy+17),8)
+                pygame.draw.line(self.window,(73,57,42),(sx-20,sy-18),(sx+21,sy+17),3)
+                for n in (-12,0,12):pygame.draw.circle(self.window,(122,92,56),(sx+n,sy+n//2),3,1)
+            # Floor vents and maintenance labels add scale without blocking movement.
+            if seed in (5,17):
+                pygame.draw.rect(self.window,(10,18,25),(sx-15,sy-9,30,18),border_radius=2)
+                pygame.draw.rect(self.window,(48,66,76),(sx-14,sy-8,28,16),1,border_radius=2)
+                for n in range(-10,13,5):pygame.draw.line(self.window,(43,58,68),(sx+n,sy-6),(sx+n,sy+6),1)
+            elif seed==73:
+                pygame.draw.line(self.window,(151,104,45),(sx-20,sy+15),(sx+20,sy+15),3)
+                for n in range(-16,18,8):pygame.draw.line(self.window,(16,22,28),(sx+n,sy+11),(sx+n+8,sy+19),3)
+        self.window.set_clip(None)
+
+    def draw_practical_lights(self,camera):
+        w=self.world;room=w.room_view_tiles();self.window.set_clip(pygame.Rect(0,0,VW,VH))
+        for o in w.objects:
+            if o.get('taken') or (int(o['x']),int(o['y'])) not in room:continue
+            if o['type'] not in ('main_terminal','aux_terminal','core','exit','camera','turret','puzzle','gate'):continue
+            sx,sy=self.px(o['x'],o['y'],camera)
+            tone='bad' if o['type'] in ('camera','turret','gate') else 'gold' if o['type']=='core' else 'good' if o['type']=='exit' else 'accent'
+            self.glow((sx,sy),54 if o['type'] in ('core','exit') else 38,tone,36)
+        p=w.player;sx,sy=self.px(p.x,p.y,camera)
+        self.glow((sx-43,sy-40),58,'accent',42)
         self.window.set_clip(None)
 
     def draw_fog(self,camera):
@@ -368,7 +482,6 @@ class Game:
 
     def draw_cones(self,camera):
         w=self.world
-        room=w.room_view_tiles()
         layer=pygame.Surface((VW,VH),pygame.SRCALPHA)
         def cast_sector(sx,sy,angle,radius,width,rgb,opacity,samples=96,outline=None):
             origin=self.px(sx,sy,camera)
@@ -376,11 +489,13 @@ class Game:
             for i in range(samples+1):
                 theta=math.radians(angle-width/2+i*width/max(1,samples))
                 stop=radius
-                steps=max(6,int(radius*18))
+                # Sub-tile ray steps are sufficient for 64 px walls and keep the
+                # clipped sensor geometry inexpensive enough for 60 FPS.
+                steps=max(6,int(radius*3))
                 for n in range(1,steps+1):
                     dist=radius*n/steps
                     x=sx+math.cos(theta)*dist;y=sy+math.sin(theta)*dist
-                    if w.collides(x,y,.04) or (int(x),int(y)) not in room:
+                    if w.collides(x,y,.04):
                         stop=max(0,dist-radius/steps)
                         break
                 pts.append(self.px(sx+math.cos(theta)*stop,sy+math.sin(theta)*stop,camera))
@@ -391,12 +506,16 @@ class Game:
                     pygame.draw.aaline(layer,(*outline,210),origin,pts[1])
                     pygame.draw.aaline(layer,(*outline,210),origin,pts[-1])
         for o in w.objects:
-            if o['type']=='camera' and w.time>=w.cam_disable_until and (int(o['x']),int(o['y'])) in room:
+            if o['type']=='camera' and w.time>=w.cam_disable_until:
                 angle=o.get('angle',0)+math.sin(w.time*.85+o['x'])*o.get('sweep',50)
-                cast_sector(o['x'],o['y'],angle,o.get('range',7),64,(242,87,108),46,samples=110,outline=(255,157,170))
+                cast_sector(o['x'],o['y'],angle,o.get('range',7),64,(242,87,108),46,samples=26,outline=(255,157,170))
         for drone in w.drones:
-            if w.time>=drone.stunned and (int(drone.x),int(drone.y)) in room:
-                cast_sector(drone.x,drone.y,0,min(3.7,drone.vision),360,(245,197,95),24,samples=84)
+            if w.time>=drone.stunned:
+                cast_sector(drone.x,drone.y,0,min(3.7,drone.vision),360,(245,197,95),24,samples=26)
+                tx,ty=((w.player.x,w.player.y) if drone.state=='chase' else
+                       ((drone.base_x,drone.base_y) if drone.patrol_backward else (drone.target_x,drone.target_y)))
+                heading=math.degrees(math.atan2(ty-drone.y,tx-drone.x))
+                cast_sector(drone.x,drone.y,heading,min(2.7,drone.vision),66,(244,88,104),35,samples=20,outline=(255,135,148))
         self.window.blit(layer,(0,0))
 
     def draw_entities(self,camera):
@@ -415,6 +534,7 @@ class Game:
             'note':'ЗАПИСЬ','main_terminal':'ТЕРМИНАЛ','aux_terminal':'КОНСОЛЬ','core':'ЯДРО','exit':'ВЫХОД',
             'camera':'КАМЕРА','turret':'ТУРЕЛЬ','puzzle':'ЗАГАДКА'
         }
+        marker_time=pygame.time.get_ticks()/1000.0
         for o in w.objects:
             if o['taken'] or o['type']=='spawn':continue
             if (int(o['x']),int(o['y'])) not in room:continue
@@ -423,35 +543,35 @@ class Game:
             if not (-50<sx<VW+50 and -50<sy<VH+50):continue
             if typ=='gate':
                 if w.gates[o['gate_id']]:
-                    pygame.draw.circle(self.window,color('good'),(sx,sy),8,2)
+                    self.animated_ring((sx,sy),7,'good',marker_time,float(o['x'])+float(o['y']),1.5,travel=1.25)
                     self.text('ОТКР.',sx,sy-18,10,'good',True,center=True)
                     continue
-                self.image('gate',sx,sy,46,46)
+                self.image('gate',sx,sy,58,58)
                 pygame.draw.rect(self.window,(10,28,42),(sx-18,sy-30,36,14),border_radius=5)
                 self.text('ШЛЮЗ',sx,sy-29,9,'bad',True,center=True)
                 continue
             asset=names.get(typ)
             if not asset:continue
-            size=42 if typ not in ('camera','turret') else 46
-            pulse=int((math.sin(w.time*3+float(o['x'])+float(o['y']))*0.5+0.5)*3)
+            size=50 if typ not in ('camera','turret') else 56
+            pygame.draw.ellipse(self.window,(0,0,0,105),(sx-size//2+4,sy+size//3-3,size-8,11))
             self.image(asset,sx,sy,size)
             obj_rect=pygame.Rect(int(sx-size/2),int(sy-size/2),size,size)
             hover=obj_rect.collidepoint(mouse)
             key=marker_colors.get(typ)
+            ring_phase=float(o['x'])*.73+float(o['y'])*.41
             if key and typ not in ('camera','turret'):
-                pygame.draw.circle(self.window,color(key),(sx,sy),size//2+6+pulse,1)
+                ring_width=2 if hover or typ in ('main_terminal','core','exit') else 1.35
+                self.animated_ring((sx,sy),size//2+5,key,marker_time,ring_phase,ring_width,hover)
             if typ=='camera':
-                pygame.draw.circle(self.window,color('bad'),(sx,sy),22,1)
-                pygame.draw.line(self.window,color('bad'),(sx,sy),(sx,sy+22),1)
+                self.animated_ring((sx,sy),21,'bad',marker_time,ring_phase,1.35,hover,1.75)
+                pygame.draw.aaline(self.window,color('bad'),(sx,sy),(sx,sy+22))
             if typ=='turret':
-                pygame.draw.circle(self.window,color('bad'),(sx,sy),24,1)
-            if typ in ('main_terminal','core','exit'):
-                pygame.draw.circle(self.window,color('accent' if typ!='core' else 'gold'),(sx,sy),25,2)
+                self.animated_ring((sx,sy),23,'bad',marker_time,ring_phase,1.35,hover,1.75)
             if typ=='broken_terminal':pygame.draw.line(self.window,color('bad'),(sx-15,sy-15),(sx+15,sy+15),3)
             if hover:
                 self.hover_object=o
-                pygame.draw.circle(self.window,color('accent'),obj_rect.center,max(18,size//2+8),2)
-            if typ in marker_labels:
+                if not key:self.smooth_ring(obj_rect.center,max(18,size//2+8),'accent',235,2)
+            if typ in marker_labels and (hover or distance((o['x'],o['y']),(w.player.x,w.player.y))<2.8 or typ in ('main_terminal','core','exit')):
                 lab=marker_labels[typ]
                 tw=self.font(10,True).size(lab)[0]
                 bx=sx-(tw+10)//2
@@ -461,27 +581,29 @@ class Game:
         for drone in w.drones:
             if (int(drone.x),int(drone.y)) not in room:continue
             sx,sy=self.px(drone.x,drone.y,camera)
-            self.image('drone',sx,sy,48)
-            pygame.draw.circle(self.window,color('gold'),(sx,sy),26,1)
+            pygame.draw.ellipse(self.window,(0,0,0,125),(sx-24,sy+16,48,12))
+            self.image('drone',sx,sy,56)
+            self.animated_ring((sx,sy),25,'gold',marker_time,drone.x*.57+drone.y*.39,1.35,travel=2)
             state_label={'patrol':'ПАТРУЛЬ','search':'ПОИСК','chase':'ПРЕСЛЕД.','stunned':'ОГЛУШЁН'}.get(drone.state,'ДРОН')
             tone='bad' if drone.state=='chase' else 'gold' if drone.state=='search' else 'accent' if drone.state=='stunned' else 'muted'
             self.rect((sx-33,sy-35,66,14),'panel','border',5)
             self.text(state_label,sx,sy-33,9,tone,True,center=True)
             if drone.state in ('chase','search'):self.text('!',sx,sy-49,22,'bad',True,center=True)
         p=w.player;sx,sy=self.px(p.x,p.y,camera)
+        pygame.draw.ellipse(self.window,(0,0,0,145),(sx-21,sy+18,42,13))
         if w.shielded:
             glow=pygame.Surface((110,110),pygame.SRCALPHA)
             pygame.draw.circle(glow,(67,219,236,45),(55,55),49)
-            pygame.draw.circle(glow,(105,255,239,135),(55,55),41,3)
             self.window.blit(glow,(sx-55,sy-55))
+            self.smooth_ring((sx,sy),41,'good',155,2.5)
         if p.hp<30:sprite='alex_hurt'
         elif int(p.walk_anim)%2 and (pygame.key.get_pressed()[pygame.K_w] or pygame.key.get_pressed()[pygame.K_s] or pygame.key.get_pressed()[pygame.K_a] or pygame.key.get_pressed()[pygame.K_d]):sprite='alex_walk'
         else:sprite='alex_idle'
-        self.image(sprite,sx,sy,47,52,flip=p.facing=='left')
-        nx,ny=sx-45,sy-43+math.sin(w.time*3)*4
-        self.image('nova',nx,ny,32)
+        self.image(sprite,sx,sy,55,61,flip=p.facing=='left')
+        nx,ny=sx-51,sy-48+math.sin(w.time*3)*4
+        self.image('nova',nx,ny,38)
         if w.lure_pos and w.time<w.lure_until and (int(w.lure_pos[0]),int(w.lure_pos[1])) in room:
-            lx,ly=self.px(*w.lure_pos,camera);pygame.draw.circle(self.window,color('gold'),(lx,ly),12,2)
+            lx,ly=self.px(*w.lure_pos,camera);self.animated_ring((lx,ly),11,'gold',marker_time,w.lure_pos[0]+w.lure_pos[1],1.5,travel=1.5)
         n=w.nearby(r=1.4)
         if n:
             self.rect((max(10,min(VW-280,sx-120)),max(6,sy-86),258,27),'panel','border',5)
@@ -494,6 +616,99 @@ class Game:
             self.text(label,mx+25,my+20,14,'text',True)
         self.window.set_clip(None)
 
+    def draw_combat_effects(self,camera):
+        """Render short event-driven combat animations below the fog layer."""
+        events=getattr(self.world,'combat_events',())
+        if not events:return
+        if self.combat_layer.get_size()!=(VW,VH):
+            self.combat_layer=pygame.Surface((VW,VH),pygame.SRCALPHA)
+        layer=self.combat_layer;layer.fill((0,0,0,0))
+
+        def limit(value):return max(0.0,min(1.0,float(value)))
+        def ease(value):
+            value=limit(value);return 1-(1-value)**3
+        def blend(a,b,value):return a+(b-a)*value
+        def point_between(a,b,value):return (blend(a[0],b[0],value),blend(a[1],b[1],value))
+        def aa_ring(center,radius,rgba,segments=72):
+            if radius<1:return
+            points=[(center[0]+math.cos(math.tau*i/segments)*radius,center[1]+math.sin(math.tau*i/segments)*radius) for i in range(segments)]
+            pygame.draw.aalines(layer,rgba,True,points)
+        def impact(center,value,tone=(255,88,108)):
+            value=limit(value);alpha=int(235*(1-value)**2);radius=7+28*ease(value)
+            aa_ring(center,radius,(*tone,alpha),48)
+            for ray in range(6):
+                angle=ray*math.tau/6+value*.7
+                inner=5+12*value;outer=inner+10*(1-value)
+                pygame.draw.aaline(layer,(*tone,alpha),(center[0]+math.cos(angle)*inner,center[1]+math.sin(angle)*inner),(center[0]+math.cos(angle)*outer,center[1]+math.sin(angle)*outer))
+
+        for event in events:
+            duration=max(.05,float(event.get('duration',.5)))
+            progress=limit((self.world.time-float(event.get('start',self.world.time)))/duration)
+            source=self.px(*event['source'],camera)
+            event_id=int(event.get('id',0))
+            kind=event.get('kind')
+
+            if kind=='turret_shot':
+                target=self.px(*event['target'],camera)
+                travel=ease(limit((progress-.06)/.58))
+                head=point_between(source,target,travel)
+                tail=point_between(source,target,max(0,travel-.22))
+                beam_alpha=int(230*(1-progress*.72))
+                pygame.draw.line(layer,(255,48,76,max(18,beam_alpha//3)),tail,head,10)
+                pygame.draw.line(layer,(255,105,127,max(25,beam_alpha)),tail,head,4)
+                pygame.draw.aaline(layer,(255,240,243,max(40,beam_alpha)),tail,head)
+                if progress<.42:
+                    charge=progress/.42
+                    aa_ring(source,5+15*charge,(255,88,108,int(230*(1-charge))),40)
+                    pygame.draw.circle(layer,(255,210,218,190),(round(source[0]),round(source[1])),max(2,round(7*(1-charge))))
+                if progress>.36:impact(target,(progress-.36)/.64)
+
+            elif kind=='drone_attack':
+                target=self.px(*event['target'],camera)
+                if progress<.28:
+                    charge=progress/.28
+                    aa_ring(source,22-12*ease(charge),(246,196,89,int(245*(1-charge*.35))),44)
+                    pygame.draw.circle(layer,(255,92,112,150),(round(source[0]),round(source[1])),max(3,round(4+6*charge)))
+                flight=ease(limit((progress-.16)/.60))
+                if flight>0:
+                    head=point_between(source,target,flight)
+                    dx=head[0]-source[0];dy=head[1]-source[1];length=max(1,math.hypot(dx,dy));nx=-dy/length;ny=dx/length
+                    bolt=[source]
+                    for index in range(1,10):
+                        frac=index/10
+                        base=point_between(source,head,frac)
+                        jitter=math.sin(index*2.31+event_id*.73+progress*18)*7*math.sin(math.pi*frac)
+                        bolt.append((base[0]+nx*jitter,base[1]+ny*jitter))
+                    bolt.append(head)
+                    pygame.draw.lines(layer,(255,71,91,70),False,bolt,8)
+                    pygame.draw.lines(layer,(244,184,80,205),False,bolt,3)
+                    pygame.draw.aalines(layer,(255,242,190,245),False,bolt)
+                    pygame.draw.circle(layer,(255,235,171,190),(round(head[0]),round(head[1])),6)
+                if progress>.46:impact(target,(progress-.46)/.54,(245,181,78))
+
+            elif kind=='player_pulse':
+                max_radius=5.1*T
+                radius=max_radius*ease(progress)
+                center=(round(source[0]),round(source[1]))
+                pulse_alpha=int(220*(1-progress)**.55)
+                if radius>2:
+                    pygame.draw.circle(layer,(61,224,242,max(8,pulse_alpha//5)),center,round(radius),10)
+                    aa_ring(source,radius,(118,255,225,pulse_alpha),108)
+                if progress>.12:
+                    echo=ease((progress-.12)/.88);echo_radius=max_radius*echo
+                    aa_ring(source,echo_radius,(64,203,239,int(135*(1-echo))),96)
+                pygame.draw.circle(layer,(76,225,243,int(95*(1-progress))),center,max(4,round(42*(1-progress)+8)))
+                for target_world in event.get('targets',()):
+                    target=self.px(*target_world,camera)
+                    fraction=min(1,distance(event['source'],target_world)/5.1)
+                    hit_progress=1-(1-fraction)**(1/3)
+                    local=(progress-hit_progress)/.30
+                    if 0<=local<=1:
+                        impact(target,local,(94,239,208))
+                        pygame.draw.aaline(layer,(173,255,241,int(220*(1-local))),source,target)
+
+        self.window.blit(layer,(0,0))
+
     def bar(self,label,value,x,y,width,tone):
         self.text(label,x,y,14,'muted',True)
         pygame.draw.rect(self.window,(37,61,79),(x,y+22,width,13),border_radius=5)
@@ -501,45 +716,63 @@ class Game:
         self.text(f'{int(value)}%',x+width-45,y,14,'text',True)
     def hud(self):
         w=self.world;x=VW+12;pw=W-VW-24
-        self.rect((VW,0,W-VW,VH),'panel',None,0)
-        self.rect((VW+8,10,W-VW-16,VH-20),'panel_alt','border',16)
-        self.text('ECHO / НОВА',x+10,24,28,'accent',True)
-        self.text(f'СЕКТОР {w.level}  •  {w.title}',x+10,63,15,'muted',True,maxw=pw-20)
-        self.text(f'МИКРОФОН: {self.voice.state}',x+10,89,13,'good' if self.voice.state=='СЛУШАЕТ' else 'gold',True,maxw=pw-20)
-        self.bar('ЗДОРОВЬЕ',w.player.hp,x+10,118,pw-24,'bad')
-        self.bar('ЭНЕРГИЯ НОВЫ',w.player.energy,x+10,170,pw-24,'accent')
-        self.bar('ТРЕВОГА',w.alert,x+10,222,pw-24,'gold')
+        pygame.draw.rect(self.window,(3,9,15),(VW,0,W-VW,VH))
+        pygame.draw.line(self.window,color('accent'),(VW+2,0),(VW+2,VH),2)
+        self.rect((VW+8,8,W-VW-16,VH-16),'panel_alt','border',10)
+        # Compact logo and deck identity.
+        self.text('E C H O',x+10,17,29,'text',True)
+        self.text('ПОСЛЕДНИЙ СИГНАЛ',x+12,51,11,'accent',True)
+        self.text(f'A{w.level} / {w.title}',x+176,22,13,'muted',True,maxw=132)
+        self.text('VOSK: '+self.voice.state,x+176,45,11,'good' if self.voice.state=='СЛУШАЕТ' else 'gold',True,maxw=132)
+        pygame.draw.line(self.window,color('border'),(x+8,70),(x+pw-8,70),1)
+        # Portrait cards echo the supplied reference while retaining live values.
+        card_w=(pw-26)//2
+        for i,(name,asset,value,tone,label) in enumerate((('ALEX','alex_idle',w.player.hp,'bad','ЗДОРОВЬЕ'),('НОВА','nova',w.player.energy,'accent','ЭНЕРГИЯ'))):
+            cx=x+8+i*(card_w+8);self.rect((cx,78,card_w,72),'panel','border',7)
+            pygame.draw.rect(self.window,(7,17,27),(cx+6,84,50,58),border_radius=5)
+            self.image(asset,cx+31,113,44,48 if asset=='alex_idle' else 44)
+            self.text(name,cx+63,87,14,'text',True)
+            self.text(label,cx+63,108,9,'muted',True)
+            for n in range(6):
+                seg=(card_w-72)//6;active=n<math.ceil(value/100*6)
+                pygame.draw.rect(self.window,color(tone) if active else color('border'),(cx+63+n*seg,129,max(3,seg-2),6),border_radius=2)
+        # Alarm strip.
+        self.text('УРОВЕНЬ ТРЕВОГИ',x+8,159,11,'muted',True)
+        states=('НИЗКИЙ','НАБЛЮДЕНИЕ','ВЫСОКИЙ','КРИТИЧЕСКИЙ');al=w.alert_level
+        self.text(states[al],x+pw-106,159,10,'bad' if al>1 else 'gold',True,maxw=98)
+        for n in range(8):
+            active=n<math.ceil(w.alert/12.5)
+            pygame.draw.rect(self.window,color('bad') if active else color('border'),(x+8+n*((pw-18)//8),178,(pw-18)//8-3,8),border_radius=2)
         near_core=w.nearby('core',r=3.7) is not None
-        self.text('СХЕМА ЯДЕР' if near_core else 'ТЕКУЩАЯ ЦЕЛЬ',x+10,275,14,'accent',True)
-        self.rect((x+9,300,pw-18,119 if near_core else 88),'panel','border',10)
+        self.text('СХЕМА ЯДЕР' if near_core else 'ТЕКУЩАЯ ЦЕЛЬ',x+8,199,11,'accent',True)
+        self.rect((x+7,217,pw-14,74),'panel','border',7)
         if near_core:
-            self.text('ПОДСКАЗКА СТАНЦИИ',x+20,309,14,'gold',True)
-            self.paragraph(w.clue,x+18,329,pw-44,14,18,'text',4)
+            self.paragraph(w.clue,x+17,226,pw-34,11,14,'text',3)
             off,on=SOLUTIONS[w.level]
-            self.text('ОТКЛ.: '+COLORS[off],x+17,391,12,'bad',True)
-            self.text('ВКЛ.: '+COLORS[on],x+172,391,12,'good',True)
+            self.text('ОТКЛ. '+COLORS[off],x+17,269,10,'bad',True)
+            self.text('ВКЛ. '+COLORS[on],x+171,269,10,'good',True)
             tag='ИНЖЕНЕРНАЯ СХЕМА: '+w.clue
             if tag not in w.history:w.history.append(tag)
         else:
-            self.paragraph(w.mission,x+20,316,pw-43,16,21,'text',3)
-        self.text('МОДУЛИ НОВЫ',x+10,431,14,'accent',True)
+            self.paragraph(w.mission,x+17,229,pw-34,13,18,'text',3)
+        self.text('МОДУЛИ НОВЫ',x+8,301,11,'accent',True)
         descriptions={'scan':'СКАН','hack':'ВЗЛОМ','shield':'ЩИТ','pulse':'ИМПУЛЬС','control':'УПРАВЛ.','memory':'ПАМЯТЬ'}
         cell_w=(pw-28)//3
         for i,(a,label) in enumerate(descriptions.items()):
-            rx=x+10+(i%3)*(cell_w+4);ry=454+(i//3)*39
-            self.rect((rx,ry,cell_w,32),'panel_soft' if a in w.abilities else 'background','good' if a in w.abilities else 'border',8)
-            self.text(label,rx+cell_w//2,ry+8,12,'good' if a in w.abilities else 'muted',True,center=True)
-        self.text('ИНВЕНТАРЬ',x+10,537,13,'accent',True)
-        self.text(f"H  Аптечка {w.inventory['medkit']}     B  Батарея {w.inventory['battery']}",x+12,558,15)
-        self.text(f"G  Маяк {w.inventory['lure']}         Ключ-карта {w.inventory['keycard']}",x+12,583,15)
-        self.text(f"ЛОГИКА: {len(w.solved_puzzles)}/3   AI: {w.ai_factor:.2f}x",x+12,608,14,'good' if len(w.solved_puzzles)==3 else 'gold',True)
-        info_y=VH-140
-        self.text(f'ОЧКИ  {w.score+self.total_score:06d}',x+10,info_y,17,'gold',True)
-        self.text(f'ВРЕМЯ  {int(w.time)//60:02d}:{int(w.time)%60:02d}',x+10,info_y+28,17,'muted')
-        btn_y=VH-104
-        self.button('КОМАНДЫ [TAB]',(x+10,btn_y,pw-20,30),lambda:setattr(self,'action_open',not self.action_open),small=True)
-        self.button('ЗАМЕТКИ [N]',(x+10,btn_y+34,pw-20,30),lambda:setattr(self,'notes_open',not self.notes_open),small=True)
-        self.button('КАРТА [M]',(x+10,btn_y+68,pw-20,30),lambda:setattr(self,'map_open',not self.map_open),small=True)
+            rx=x+8+(i%3)*(cell_w+4);ry=319+(i//3)*31
+            self.rect((rx,ry,cell_w,25),'panel_soft' if a in w.abilities else 'background','good' if a in w.abilities else 'border',5)
+            self.text(label,rx+cell_w//2,ry+6,10,'good' if a in w.abilities else 'muted',True,center=True)
+        self.text('ТАКТИЧЕСКАЯ КАРТА',x+8,386,11,'accent',True)
+        self.mini_map(x+45,428,5)
+        inventory=f"H {w.inventory['medkit']}   B {w.inventory['battery']}   G {w.inventory['lure']}   КАРТА {w.inventory['keycard']}"
+        self.text(inventory,x+10,599,11,'text',True,maxw=pw-20)
+        self.text(f"ЗАГАДКИ {len(w.solved_puzzles)}/3  •  AI {w.ai_factor:.2f}x  •  {int(w.time)//60:02d}:{int(w.time)%60:02d}",x+10,620,11,'gold',True,maxw=pw-20)
+        self.text(f'ОЧКИ {w.score+self.total_score:06d}',x+10,640,12,'muted',True)
+        btn_y=665;bw=(pw-24)//3
+        self.button('TAB',(x+8,btn_y,bw,29),lambda:setattr(self,'action_open',not self.action_open),small=True)
+        self.button('N ЗАМЕТКИ',(x+12+bw,btn_y,bw,29),lambda:setattr(self,'notes_open',not self.notes_open),small=True)
+        self.button('M КАРТА',(x+16+bw*2,btn_y,bw,29),lambda:setattr(self,'map_open',not self.map_open),small=True)
+        self.text('WASD  •  SHIFT  •  E  •  V  •  F11',x+pw//2,710,10,'muted',True,center=True)
     def messages(self):
         w=self.world
         if not w.log:return
@@ -567,8 +800,7 @@ class Game:
     def mini_map(self,x,y,scale=7):
         w=self.world
         room=w.room_view_tiles()
-        self.rect((x-13,y-35,w.width*scale+26,w.height*scale+56),'panel','border',10)
-        self.text('КАРТА СЕКТОРА • [M]',x,y-24,15,'accent',True)
+        self.rect((x-13,y-25,w.width*scale+26,w.height*scale+36),'panel','border',7)
         for yy in range(w.height):
             for xx in range(w.width):
                 tile=w.tiles[yy*w.width+xx]
@@ -583,7 +815,10 @@ class Game:
             sx=x+int(o['x']*scale);sy=y+int(o['y']*scale)
             shade=(84,215,217) if o['type']=='main_terminal' else (240,208,114) if o['type']=='core' else (119,230,160) if o['type']=='exit' else None
             if o['type']=='gate' and not w.gates[o['gate_id']]:shade=(239,114,125)
+            if o['type'] in ('camera','turret'):shade=(239,80,98)
             if shade:pygame.draw.circle(self.window,shade,(sx,sy),4)
+        for d in w.drones:
+            if (int(d.x),int(d.y)) in room:pygame.draw.circle(self.window,(239,80,98),(x+int(d.x*scale),y+int(d.y*scale)),3)
         pygame.draw.circle(self.window,(241,250,252),(x+int(w.player.x*scale),y+int(w.player.y*scale)),5)
 
     def action_menu(self):
@@ -619,8 +854,11 @@ class Game:
         self.window.fill((7,16,27))
         camera=self.world_camera()
         self.draw_map_tiles(camera)
+        self.draw_environment_details(camera)
         self.draw_cones(camera)
         self.draw_entities(camera)
+        self.draw_practical_lights(camera)
+        self.draw_combat_effects(camera)
         if CFG.get('fog_enabled',True):self.draw_fog(camera)
         self.hud();self.messages()
         self.rect((18,H-30,390,18),'panel','border',8)

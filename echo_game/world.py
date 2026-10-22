@@ -75,6 +75,7 @@ class World:
         self.level_end='';self.ending='';self.shield_until=0.0;self.cam_disable_until=0.0
         self.terminal_stage=0;self.core_stage=0;self.gates={'A':False,'B':False}
         self.history=[];self.log=[];self.log_counter=0;self.camera_suspicion={}
+        self.combat_events=[];self.combat_event_seq=0
         self.ai_factor=1.0
         self.puzzles={p['id']:p for p in json.loads((ROOT/'story'/'puzzles.json').read_text(encoding='utf-8')).get(str(level),[])}
         self.solved_puzzles=set()
@@ -88,6 +89,20 @@ class World:
     def message(self,text,kind='info'):
         self.log_counter+=1
         self.log.append((self.time,text,kind));self.log=self.log[-8:]
+    def combat_fx(self,kind,source,target=None,targets=None,duration=.5):
+        """Record a short, renderer-agnostic combat event with fixed coordinates."""
+        self.combat_event_seq+=1
+        event={
+            'id':self.combat_event_seq,
+            'kind':str(kind),
+            'start':self.time,
+            'duration':max(.05,float(duration)),
+            'source':[float(source[0]),float(source[1])],
+        }
+        if target is not None:event['target']=[float(target[0]),float(target[1])]
+        if targets is not None:event['targets']=[[float(x),float(y)] for x,y in targets]
+        self.combat_events.append(event);self.combat_events=self.combat_events[-24:]
+        return event
     def solve_puzzle(self,puzzle_id,choice):
         p=self.puzzles.get(str(puzzle_id))
         if not p or puzzle_id in self.solved_puzzles:return False
@@ -148,19 +163,48 @@ class World:
                 if (nx,ny) not in seen and self.is_walkable_tile(nx,ny):
                     seen.add((nx,ny));q.append((nx,ny))
         if active and not self.is_portal_tile(sx,sy):
+            previous=getattr(self,'_last_room_tiles',None)
+            # A few maps use 1-tile L-shaped connector pockets between two
+            # door thresholds. Treat these tiny components as a transition,
+            # otherwise fog collapses to only 3 cells for a single step.
+            if previous and len(seen)<=6:
+                seen=set(previous)|seen
             self._last_room_tiles=seen
         return seen
 
     def room_view_tiles(self):
-        # The room itself is fully visible, together with its enclosing
-        # walls/closed gates. Adjacent rooms remain completely hidden.
+        # The current room is fully visible. A short flood through each open
+        # doorway previews only the entrance of the next room, giving the
+        # player enough information to time a safe crossing without revealing
+        # the complete room.
         room=self.room_tiles()
-        view=set(room)
-        for cx,cy in room:
+        visible_floor=set(room)|self.room_preview_tiles(room)
+        view=set(visible_floor)
+        for cx,cy in visible_floor:
             for nx,ny in ((cx+1,cy),(cx-1,cy),(cx,cy+1),(cx,cy-1)):
                 if 0<=nx<self.width and 0<=ny<self.height and not self.is_walkable_tile(nx,ny):
                     view.add((nx,ny))
         return view
+
+    def room_preview_tiles(self,room=None,depth=3):
+        """Return a small walkable slice beyond doorways of ``room``."""
+        room=set(self.room_tiles() if room is None else room)
+        seeds=[]
+        for cx,cy in room:
+            if not self.is_portal_tile(cx,cy):continue
+            for nx,ny in ((cx+1,cy),(cx-1,cy),(cx,cy+1),(cx,cy-1)):
+                if (nx,ny) not in room and self.is_walkable_tile(nx,ny):
+                    seeds.append((nx,ny))
+        preview=set();seen=set();queue=deque((x,y,1) for x,y in seeds)
+        while queue:
+            x,y,steps=queue.popleft()
+            if (x,y) in seen or (x,y) in room or steps>depth:continue
+            seen.add((x,y));preview.add((x,y))
+            if steps==depth:continue
+            for nx,ny in ((x+1,y),(x-1,y),(x,y+1),(x,y-1)):
+                if (nx,ny) not in seen and (nx,ny) not in room and self.is_walkable_tile(nx,ny):
+                    queue.append((nx,ny,steps+1))
+        return preview
 
     def ray_clear(self,ax,ay,bx,by):
         d=math.hypot(bx-ax,by-ay)
@@ -239,10 +283,12 @@ class World:
         if cmd=='pulse':
             if 'pulse' not in self.abilities:return self.fail('Модуль импульса ещё не найден.')
             if self.player.energy<36:return self.fail('Недостаточно энергии для импульса (36).')
-            self.player.energy-=36;affected=0
+            self.player.energy-=36;affected=0;targets=[]
             for drone in self.drones:
                 if distance((drone.x,drone.y),(self.player.x,self.player.y))<5.1:
+                    targets.append((drone.x,drone.y))
                     drone.stunned=self.time+5;drone.state='stunned';affected+=1
+            self.combat_fx('player_pulse',(self.player.x,self.player.y),targets=targets,duration=.78)
             if affected:return self.success(f'Оглушено дронов: {affected}.',80*affected)
             self.message('НОВА: Импульс активирован, поблизости нет целей.','info');return True
         if cmd=='medkit':return self.use_item('medkit')
@@ -383,10 +429,13 @@ class World:
             if not self.collides(nx,d.y,.25):d.x=nx
             if not self.collides(d.x,ny,.25):d.y=ny
         if d.state=='chase' and distance((d.x,d.y),(self.player.x,self.player.y))<2.5 and d.attack_cooldown<=0:
-            d.attack_cooldown=2.0/self.difficulty;self.damage(14,'Импульс дрона')
+            d.attack_cooldown=2.0/self.difficulty
+            self.combat_fx('drone_attack',(d.x,d.y),(self.player.x,self.player.y),duration=.48)
+            self.damage(14,'Импульс дрона')
     def step(self,dt,dx=0,dy=0,run=False):
         if self.status!='playing':return
         dt=clamp(float(dt),0,.07);self.time+=dt
+        self.combat_events=[event for event in self.combat_events if self.time-event['start']<=event['duration']+.08]
         p=self.player
         if dx or dy:
             l=math.hypot(dx,dy);dx/=l;dy/=l
@@ -418,6 +467,7 @@ class World:
         for o in self.objects:
             if o['type']=='turret' and self.alert>=47 and self.time-self.last_damage>1.2:
                 if distance((o['x'],o['y']),(p.x,p.y))<=float(o.get('range',7)) and self.ray_clear(o['x'],o['y'],p.x,p.y):
+                    self.combat_fx('turret_shot',(o['x'],o['y']),(p.x,p.y),duration=.34)
                     self.damage(12,'Выстрел турели')
         if self.challenge and self.alert<20:self.alert+=dt*.25
     def snapshot(self):

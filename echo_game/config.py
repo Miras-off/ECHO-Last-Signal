@@ -2,24 +2,24 @@ from pathlib import Path
 import json
 ROOT=Path(__file__).resolve().parents[1]
 DEFAULT={
- 'screen_width':1366,'screen_height':768,'fps':60,'tile_pixels':48,
+ 'screen_width':1366,'screen_height':768,'fps':60,'tile_pixels':64,
  'fullscreen':True,
  'ambient_enabled':False,
  'fog_enabled':True,
  'master_volume':70,
  'ui_scale':100,
  'palette':{
-  'background':'#07111c',
-  'panel':'#0c1928',
-  'panel_alt':'#122436',
-  'panel_soft':'#173047',
-  'border':'#28475f',
-  'text':'#eaf7fb',
-  'muted':'#88a9bb',
-  'accent':'#6be6ea',
-  'good':'#87e6b0',
-  'bad':'#f27885',
-  'gold':'#f6cd83'
+  'background':'#030910',
+  'panel':'#07131f',
+  'panel_alt':'#0a1b29',
+  'panel_soft':'#10283a',
+  'border':'#1e4962',
+  'text':'#e8f7fb',
+  'muted':'#789aac',
+  'accent':'#45dff4',
+  'good':'#68e5bd',
+  'bad':'#ff5268',
+  'gold':'#e9b95f'
  },
  'sound_enabled':True
 }

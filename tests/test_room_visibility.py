@@ -39,13 +39,49 @@ class RoomVisibilityTests(unittest.TestCase):
                 self.assertNotIn(a, new_room)
                 self.assertGreater(len(new_room), 4)
 
-    def test_room_view_includes_walls_but_not_neighboring_floor(self):
+    def test_room_view_includes_bounded_doorway_preview(self):
+        for level in (1, 2, 3):
+            with self.subTest(level=level):
+                w = World(level)
+                base = w.room_tiles()
+                first_step = w.room_preview_tiles(base, depth=1)
+                preview = w.room_preview_tiles(base, depth=3)
+                view = w.room_view_tiles()
+                self.assertTrue(first_step)
+                self.assertTrue(first_step.issubset(preview))
+                self.assertTrue(base.isdisjoint(preview))
+                self.assertTrue(all(w.is_walkable_tile(*cell) for cell in preview))
+                self.assertTrue((base | preview).issubset(view))
+                self.assertTrue(any(not w.is_walkable_tile(*cell) for cell in view))
+                seeds = list(first_step)
+                self.assertTrue(all(min(abs(x-sx)+abs(y-sy) for sx,sy in seeds) <= 2 for x,y in preview))
+                self.assertLess(len(preview), len(base))
+
+    def test_closed_gate_does_not_leak_preview(self):
         w = World(1)
-        base = w.room_tiles()
-        view = w.room_view_tiles()
-        self.assertTrue(base.issubset(view))
-        self.assertTrue(any(not w.is_walkable_tile(*cell) for cell in view))
-        self.assertTrue(all(cell in base or not w.is_walkable_tile(*cell) for cell in view))
+        gate = next(o for o in w.objects if o['type'] == 'gate' and o['gate_id'] == 'A')
+        gate_cell = (int(gate['x']), int(gate['y']))
+        self.assertFalse(w.is_walkable_tile(*gate_cell))
+        self.assertNotIn(gate_cell, w.room_preview_tiles())
+        w.gates['A'] = True
+        self.assertTrue(w.is_walkable_tile(*gate_cell))
+
+    def test_tiny_connector_keeps_previous_room_visible(self):
+        w = World(1)
+        w.player.x,w.player.y = 9.5,25.5
+        original = w.room_tiles()
+        self.assertIn((9,25), original)
+        for x,y in ((10.5,25.5),(11.5,25.5),(12.5,25.5)):
+            w.player.x,w.player.y = x,y
+            transition = w.room_tiles()
+            self.assertIn((9,25), transition)
+            self.assertIn((int(x),int(y)), transition)
+            self.assertGreaterEqual(len(transition),len(original))
+        w.gates['A'] = True
+        w.player.x,w.player.y = 14.5,23.5
+        next_room = w.room_tiles()
+        self.assertIn((14,23), next_room)
+        self.assertNotIn((9,25), next_room)
 
 if __name__ == '__main__':
     unittest.main()
