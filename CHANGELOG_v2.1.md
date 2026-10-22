@@ -61,3 +61,11 @@
 - Sound priority/cooldowns to avoid ear-piercing overlap.
 - Separate saved master/music/SFX/Nova-signal volumes; music and ambience toggles; menu-return fix.
 - Original, editable audio samples and reproducible generator `scripts/generate_soundtrack.py`; additional audio tests.
+
+
+## v2.1.2 — Demo monetization
+- 3 persistent attempts with one-life debit for each true defeat, lockout at 0.
+- New offline ECHO PAY demo checkout + receipts, 490 ₸ pack of 3 lives, 1490 ₸ Premium Pass with unlimited lives and challenge access.
+- SQLite wallet and purchase journal; save reset cannot grant extra attempts.
+- Retry, resume, menu and Premium Challenge consistently follow economy rules.
+- Does not collect real financial information or charge money.

@@ -48,6 +48,9 @@ class Game:
         self.combat_layer=pygame.Surface((VW,VH),pygame.SRCALPHA)
         self.mode='menu';self.world=None
         self.storage=Storage();self.voice=VoiceListener()
+        self.wallet_cache=self.storage.wallet()
+        self.loss_accounted=False
+        self.payment_product=None;self.payment_origin='store';self.payment_receipt=None
         self.assets={};self.cover=None;self.tiles=None
         self.buttons=[];self.action_open=False;self.map_open=False;self.notes_open=False
         self.message_note='';self.total_score=0;self.game_ending='';self.prev_level=1
@@ -195,12 +198,19 @@ class Game:
             self.image_cache[key]=frame
         self.window.blit(frame,(int(cx-width/2),int(cy-height/2)))
     def start(self,resume=False,challenge=False):
+        if not self.storage.can_play():
+            self.mode='locked'
+            return False
+        self.loss_accounted=False
         snapshot=self.storage.load() if resume else None
         if challenge:
             self.world=World(2,abilities=['scan','hack','shield','pulse','control','memory'],inventory={'medkit':2,'battery':2,'keycard':1,'lure':2},challenge=True)
         elif snapshot:
             self.world=World(snapshot['level'],snapshot.get('abilities',[]),stats=snapshot.get('stats'),inventory=snapshot.get('inventory'))
             self.world.restore(snapshot)
+            # Recover from old v2.1.1 save files written after a fatal hit.
+            # Account lives are checked above; this does not refill the wallet.
+            if self.world.player.hp<=0:self.world.player.hp=100
             self.total_score=snapshot.get('total_score',0)
         else:
             self.world=World(1);self.total_score=0;self.storage.clear()
@@ -211,9 +221,14 @@ class Game:
         self.last_combat_audio_id=0;self.camera_warning_ids=set();self.previous_drone_states={};self.turret_armed=False
         if not challenge:self.save()
     def save(self):
-        if self.world and not self.world.challenge:
+        # Keep the last playable checkpoint on defeat (never save a zero-HP snapshot).
+        if self.world and not self.world.challenge and self.world.status!='lost':
             snap=self.world.snapshot();snap['total_score']=self.total_score;self.storage.save(snap)
     def restart(self):
+        if not self.storage.can_play():
+            self.mode='locked'
+            return False
+        self.loss_accounted=False
         if self.world:
             w=self.world
             self.world=World(w.level,abilities=w.abilities,inventory={'medkit':1,'battery':1,'keycard':0,'lure':0},challenge=w.challenge)
@@ -283,7 +298,7 @@ class Game:
                 if self.world.status=='won':
                     if self.world.level==3 and not self.world.challenge:self.mode='ending_choice'
                     else:self.next_level()
-                else:self.restart()
+                else:self.result_next()
         if self.mode=='ending_choice':
             if evt.key==pygame.K_1:self.choose_ending('Свобода')
             if evt.key==pygame.K_2 and 'memory' in self.world.abilities:self.choose_ending('Последний протокол')
@@ -326,6 +341,9 @@ class Game:
         self.audio_events()
         self.audio.update(dt,'play',self.world)
         if self.world.status!='playing':
+            if self.world.status=='lost' and not self.loss_accounted:
+                self.wallet_cache=self.storage.record_defeat()
+                self.loss_accounted=True
             self.sound('victory' if self.world.status=='won' else 'fail')
             self.mode='result';self.save()
 
@@ -401,15 +419,18 @@ class Game:
         pygame.draw.rect(self.window,(7,21,35),(29,266,525,444),border_radius=16)
         self.rect((42,285,500,417),'panel','border',14)
         self.text('АТЛАС-9  /  ЭВАКУАЦИЯ',77,309,17,'accent',True)
+        wallet=self.storage.wallet()
+        life_text='ЖИЗНИ: БЕЗЛИМИТ' if wallet['unlimited'] else f'ЖИЗНИ: {wallet["lives"]}  /  3'
+        self.text(life_text,77,430,17,'good' if self.storage.can_play() else 'bad',True)
         self.paragraph('Ты очнулся на заброшенном военном корабле. Восстанови Нову, избегай охраны и найди спасательную шлюпку.',77,353,425,20,28,'text')
-        self.button('НОВАЯ ИГРА',(73,454,432,51),lambda:self.start(),True)
-        self.button('ПРОДОЛЖИТЬ',(73,514,210,48),lambda:self.start(resume=True),disabled=self.storage.load() is None,small=True)
+        self.button('НОВАЯ ИГРА' if self.storage.can_play() else 'НУЖНО КУПИТЬ ЖИЗНИ',(73,454,432,51),lambda:self.start(),True)
+        self.button('ПРОДОЛЖИТЬ',(73,514,210,48),lambda:self.start(resume=True),disabled=self.storage.load() is None or not self.storage.can_play(),small=True)
         self.button('КАК ИГРАТЬ',(296,514,209,48),lambda:self.set_mode('help'),small=True)
         self.button('РЕКОРДЫ',(73,574,210,48),lambda:self.set_mode('records'),small=True)
         self.button('НАСТРОЙКИ',(296,574,209,48),lambda:self.set_mode('settings'),small=True)
-        self.button('PREMIUM',(73,634,210,44),lambda:self.set_mode('store'),small=True)
+        self.button('МАГАЗИН / PREMIUM',(73,634,210,44),lambda:self.set_mode('store'),small=True)
         self.button('ВЫХОД',(296,634,209,44),lambda:setattr(self,'running',False),small=True)
-        self.text('v2.1 • CINEMATIC ART / Tiled / Vosk / Local Q-learning',23,746,14,'muted')
+        self.text('v2.1.2 • MONETIZATION DEMO / NO REAL PAYMENTS',23,746,14,'muted')
     def set_mode(self,value):
         if value=='settings':self.settings_return_mode='pause' if self.mode=='pause' else 'menu'
         self.mode=value
@@ -808,6 +829,9 @@ class Game:
         self.text(inventory,x+10,599,11,'text',True,maxw=pw-20)
         self.text(f"ЗАГАДКИ {len(w.solved_puzzles)}/3  •  AI {w.ai_factor:.2f}x  •  {int(w.time)//60:02d}:{int(w.time)%60:02d}",x+10,620,11,'gold',True,maxw=pw-20)
         self.text(f'ОЧКИ {w.score+self.total_score:06d}',x+10,640,12,'muted',True)
+        attempts=self.wallet_cache
+        life_label='ЖИЗНИ: ∞' if attempts['unlimited'] else f'ЖИЗНИ: {attempts["lives"]}'
+        self.text(life_label,x+pw-112,640,12,'good' if attempts['unlimited'] else 'gold',True,maxw=104)
         btn_y=665;bw=(pw-24)//3
         self.button('TAB',(x+8,btn_y,bw,29),lambda:setattr(self,'action_open',not self.action_open),small=True)
         self.button('N ЗАМЕТКИ',(x+12+bw,btn_y,bw,29),lambda:setattr(self,'notes_open',not self.notes_open),small=True)
@@ -933,13 +957,14 @@ class Game:
             'Камеры вызывают турели. Дроны преследуют и атакуют. Прячься за стенами.',
             'Щит скрывает от сканеров 7 секунд; импульс оглушает ближайших дронов на 5 секунд.',
             'Логические терминалы: E — открыть, 1–3 — выбрать ответ. Для шлюзов A/B нужны задания.',
+            'После трёх поражений попытки заканчиваются. В магазине — только демо-покупка жизней или Premium без реальных платежей.',
             'Редактирование: карты — Tiled (*.tmj), персонажи — Inkscape (*.svg), сценарии — JSON.'
         ]
-        y=237
+        y=229
         for line in info:
-            self.rect((118,y-4,W-236,38),'panel_alt','border',6)
-            self.text('• '+line,133,y+3,16,'text',maxw=W-275)
-            y+=46
+            self.rect((118,y-4,W-236,35),'panel_alt','border',6)
+            self.text('• '+line,133,y+3,15,'text',maxw=W-275)
+            y+=40
         self.button('НАЗАД',(W//2-180,716,360,46),lambda:self.set_mode('pause' if self.world and self.world.status=='playing' else 'menu'))
     def settings(self):
         self.panel_base('НАСТРОЙКИ','Звук, интерфейс и экран • изменения сохраняются сразу')
@@ -1000,26 +1025,111 @@ class Game:
         badges=self.storage.achievements()
         if badges:self.text('ДОСТИЖЕНИЯ:  '+ '  •  '.join(badges),W//2,684,16,'good',center=True,maxw=W-200)
         self.button('НАЗАД',(W//2-175,727,350,44),lambda:self.set_mode('menu'))
+    def begin_payment(self,product,origin='store'):
+        if product not in self.storage.DEMO_PRODUCTS:return
+        self.payment_product=product
+        self.payment_origin=origin
+        self.payment_receipt=None
+        self.mode='payment'
+        self.sound('ui_click')
+
+    def finish_payment(self):
+        if self.payment_product not in self.storage.DEMO_PRODUCTS:return
+        self.payment_receipt=self.storage.purchase_demo(self.payment_product)
+        self.wallet_cache=self.storage.wallet()
+        self.sound('puzzle_ok')
+        self.mode='receipt'
+
+    def close_receipt(self):
+        origin=self.payment_origin
+        if origin=='result' and self.world and self.world.status=='lost':
+            self.mode='result'
+        elif origin=='locked':
+            self.mode='menu'
+        else:self.mode='store'
+
+    def locked(self):
+        self.panel_base('ПОПЫТКИ ЗАКОНЧИЛИСЬ','Три поражения исчерпали запас жизней • восстановление только в магазине')
+        self.rect((W//2-410,254,820,409),'panel','border',16)
+        self.text('ДОСТУП К ИГРЕ ЗАБЛОКИРОВАН',W//2,291,26,'bad',True,center=True)
+        self.paragraph('Попытки сохраняются в SQLite даже после перезапуска игры. Бесплатного восстановления нет. Это учебный магазин: деньги не списываются.',W//2-345,345,690,19,29,'text',4)
+        self.button('КУПИТЬ 3 ЖИЗНИ  •  490 ₸',(W//2-320,454,640,56),lambda:self.begin_payment('lives_3','locked'),True)
+        self.button('PREMIUM: БЕЗЛИМИТ  •  1 490 ₸',(W//2-320,527,640,54),lambda:self.begin_payment('premium_pass','locked'))
+        self.button('ГЛАВНОЕ МЕНЮ',(W//2-180,686,360,48),lambda:self.set_mode('menu'))
+
     def store(self):
-        self.panel_base('PREMIUM / CHALLENGE SECTOR','Учебная демонстрация коммерциализации • без реальных платежей')
-        self.rect((W//2-390,245,780,340),'panel','border',16)
-        self.text('ДОПОЛНИТЕЛЬНЫЙ СЕКТОР',W//2,272,28,'accent',True,center=True)
-        self.paragraph('Особое испытание: усиленные дроны, оборудование Новы разблокировано сразу. Доступ открывается демонстрационной покупкой без денег.',W//2-340,337,680,22,32,'text')
-        bought=self.storage.has_unlock('premium_challenge')
-        self.text('СТАТУС: '+('ОТКРЫТ' if bought else 'ЗАБЛОКИРОВАН'),W//2,470,22,'good' if bought else 'gold',True,center=True)
-        if not bought:self.button('РАЗБЛОКИРОВАТЬ (ДЕМО)',(W//2-235,526,470,54),lambda:self.storage.unlock('premium_challenge'),True)
-        else:self.button('ИГРАТЬ ИСПЫТАНИЕ',(W//2-235,526,470,54),lambda:self.start(challenge=True),True)
-        self.button('НАЗАД',(W//2-180,703,360,48),lambda:self.set_mode('menu'))
+        self.panel_base('МАГАЗИН / PREMIUM','Учебный прототип коммерциализации • покупки и цены только демонстрационные')
+        self.rect((W//2-435,228,870,455),'panel','border',16)
+        wallet=self.storage.wallet()
+        lives='БЕЗЛИМИТ' if wallet['unlimited'] else str(wallet['lives'])
+        self.text(f'ДОСТУПНО ЖИЗНЕЙ: {lives}',W//2,251,24,'good' if self.storage.can_play() else 'bad',True,center=True)
+        self.rect((W//2-390,310,780,115),'panel_alt','border',10)
+        self.text('НАБОР: +3 ЖИЗНИ',W//2-365,321,23,'text',True)
+        self.text('Без срока действия • сохраняется при перезапуске',W//2-365,358,16,'muted')
+        self.button('490 ₸  •  ДЕМО-ОПЛАТА',(W//2+100,350,268,52),lambda:self.begin_payment('lives_3','store'),True,small=True)
+        self.rect((W//2-390,445,780,135),'panel_alt','border',10)
+        self.text('PREMIUM PASS',W//2-365,460,23,'accent',True)
+        self.text('Безлимитные жизни + отдельный Challenge Sector',W//2-365,491,17,'text')
+        if not wallet['unlimited']:
+            self.button('1 490 ₸  •  ДЕМО-ОПЛАТА',(W//2+100,516,268,48),lambda:self.begin_payment('premium_pass','store'),True,small=True)
+        else:self.text('ПРИОБРЕТЕНО',W//2+155,528,19,'good',True)
+        if self.storage.has_unlock('premium_challenge'):
+            self.button('ИГРАТЬ CHALLENGE SECTOR',(W//2-260,613,520,43),lambda:self.start(challenge=True),small=True)
+        else:
+            self.text('Challenge Sector открывается с Premium Pass',W//2,619,16,'muted',center=True)
+        self.button('НАЗАД',(W//2-180,699,360,48),lambda:self.set_mode('menu'))
+
+    def payment(self):
+        """Safe, clearly fictional checkout page; do not collect payment details."""
+        product=self.storage.DEMO_PRODUCTS.get(self.payment_product)
+        if not product:
+            self.mode='store';return
+        self.panel_base('ECHO PAY / ДЕМОКАССА','ИМИТАЦИЯ ПЛАТЕЖА  •  НЕ НАСТОЯЩИЙ ПЛАТЁЖ')
+        self.rect((W//2-425,232,850,460),'panel','border',16)
+        self.text('ОФОРМЛЕНИЕ ДЕМОЗАКАЗА',W//2,260,26,'accent',True,center=True)
+        self.text('01  КОРЗИНА    /    02  ДЕМО-ОПЛАТА    /    03  ЧЕК',W//2,295,14,'muted',center=True)
+        self.rect((W//2-360,319,720,180),'panel_alt','border',12)
+        self.text('ТОВАР',W//2-333,339,14,'muted',True)
+        self.text(product['name'],W//2-333,368,22,'text',True)
+        self.text('ПОЛУЧАТЕЛЬ: ECHO / УЧЕБНЫЙ МАГАЗИН',W//2-333,410,16,'muted')
+        self.text('СПОСОБ: TEST MODE  •  БЕЗ КАРТЫ И БАНКА',W//2-333,443,16,'muted')
+        self.text(f'К ОПЛАТЕ:  {product["price_kzt"]:,} ₸'.replace(',',' '),W//2,519,29,'gold',True,center=True)
+        self.text('Никакие реквизиты не вводятся и реальные деньги не списываются.',W//2,559,16,'muted',center=True)
+        self.button('ПОДТВЕРДИТЬ ДЕМО-ОПЛАТУ',(W//2-300,606,600,54),self.finish_payment,True)
+        self.button('ОТМЕНИТЬ',(W//2-180,707,360,44),lambda:self.set_mode(self.payment_origin))
+
+    def receipt(self):
+        receipt=self.payment_receipt
+        if not receipt:
+            self.mode='store';return
+        self.panel_base('ОПЛАТА УСПЕШНА • ДЕМО','Покупка симулирована, реальные средства не использовались')
+        self.rect((W//2-405,252,810,377),'panel','border',16)
+        self.text('ЗАКАЗ ОБРАБОТАН ЛОКАЛЬНО',W//2,300,27,'good',True,center=True)
+        self.text(receipt['name'],W//2,361,23,'text',True,center=True)
+        self.text(f'СУММА: {receipt["price_kzt"]:,} ₸'.replace(',',' '),W//2,416,23,'gold',True,center=True)
+        self.text('ЧЕК: '+receipt['receipt'],W//2,469,18,'muted',True,center=True)
+        self.text('Данные сохранены в SQLite • офлайн • тестовый режим',W//2,526,16,'muted',center=True)
+        self.button('ПРОДОЛЖИТЬ',(W//2-210,651,420,58),self.close_receipt,True)
+
     def result(self):
         w=self.world;won=w.status=='won'
         self.panel_base('СЕКТОР ПРОЙДЕН' if won else 'СИГНАЛ ПОТЕРЯН', 'Цель достигнута' if won else 'Алекс погиб. Нова сохранила последние данные.')
         self.rect((W//2-330,266,660,267),'panel','border',12)
         lines=[f'Очки сектора: {w.score}',f'Время: {int(w.time)//60:02d}:{int(w.time)%60:02d}',f'Обнаружения: {w.stats["detections"]}',f'Ошибки команд: {w.stats["errors"]}',f'Собранные предметы: {w.stats["items"]}']
         for i,line in enumerate(lines):self.text(line,W//2-245,288+i*43,22,'text')
-        self.button('ДАЛЬШЕ' if won else 'ПОВТОРИТЬ УРОВЕНЬ',(W//2-245,572,490,58),lambda:self.result_next(),True)
+        if not won:
+            wallet=self.storage.wallet()
+            count='БЕЗЛИМИТ' if wallet['unlimited'] else str(wallet['lives'])
+            self.text('ОСТАЛОСЬ ЖИЗНЕЙ: '+count,W//2,527,19,'good' if self.storage.can_play() else 'bad',True,center=True)
+        if won or self.storage.can_play():
+            self.button('ДАЛЬШЕ' if won else 'ПОВТОРИТЬ УРОВЕНЬ',(W//2-245,572,490,58),lambda:self.result_next(),True)
+        else:
+            self.button('КУПИТЬ ЖИЗНИ — 490 ₸ (ДЕМО)',(W//2-245,572,490,58),lambda:self.begin_payment('lives_3','result'),True)
         self.button('В МЕНЮ',(W//2-245,650,490,48),lambda:self.set_mode('menu'))
     def result_next(self):
-        if self.world.status=='lost':self.restart()
+        if self.world.status=='lost':
+            if self.storage.can_play():self.restart()
+            else:self.mode='locked'
         elif self.world.level==3 and not self.world.challenge:self.mode='ending_choice'
         else:self.next_level()
     def ending_choice(self):
@@ -1048,6 +1158,9 @@ class Game:
         elif self.mode=='records':self.records()
         elif self.mode=='settings':self.settings()
         elif self.mode=='store':self.store()
+        elif self.mode=='locked':self.locked()
+        elif self.mode=='payment':self.payment()
+        elif self.mode=='receipt':self.receipt()
         elif self.mode=='result':self.result()
         elif self.mode=='ending_choice':self.ending_choice()
         elif self.mode=='credits':self.credits()
