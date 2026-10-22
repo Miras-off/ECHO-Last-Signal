@@ -1,284 +1,349 @@
-"""Deterministic first-level gameplay. No dependencies on Pygame or microphones.
-
-All coordinates in tile units. Rendering and input live in separate modules.
+"""Pure Python game simulation. Maps are editable with Tiled, art with Inkscape.
+No imports of Pygame or microphone: physics, AI and objectives can be tested headlessly.
 """
-from dataclasses import dataclass
-from math import hypot, sin
-from typing import Literal
+from __future__ import annotations
+from dataclasses import dataclass, field
+from pathlib import Path
+from collections import deque
+import json, math
 
-LEVEL = [
-    '###################',
-    '#.......#.........#',
-    '#..##...#.....##..#',
-    '#.......#.........#',
-    '#.......#.........#',
-    '#.................#',
-    '#.......#.........#',
-    '#....#..#...##....#',
-    '#.......#.........#',
-    '#.......#.........#',
-    '#.......#.........#',
-    '###################',
-]
-assert len(LEVEL) == 12 and all(len(row) == 19 for row in LEVEL)
+ROOT=Path(__file__).resolve().parents[1]
+ABILITIES=('scan','hack','shield','pulse','control','memory')
+COLORS={'red':'красное','yellow':'жёлтое','blue':'синее'}
+SOLUTIONS={1:('red','yellow'),2:('blue','red'),3:('yellow','blue')}
 
-TERMINAL = (6.5, 3.5)
-GATE = (8.5, 5.5)
-CORE = (15.5, 3.5)
-EXIT = (16.5, 9.5)
-LASER = (5.5, 6.5)
-CACHE = (3.5, 9.5)
 
+def distance(a,b):return math.hypot(a[0]-b[0],a[1]-b[1])
+def props(obj):return {p['name']:p['value'] for p in obj.get('properties',[])}
+def clamp(x,a,b):return max(a,min(b,x))
+
+def load_map(n):
+    path=ROOT/'maps'/f'level_{n}.tmj'
+    data=json.loads(path.read_text(encoding='utf-8'))
+    assert data['width']>0 and data['height']>0
+    layers=data['layers'];tiles=next(z['data'] for z in layers if z['type']=='tilelayer')
+    objects=[]
+    for source in next(z['objects'] for z in layers if z['type']=='objectgroup'):
+        o={'id':source['id'],'type':source['type'],'name':source['name'],'x':source['x']/48,'y':source['y']/48,'taken':False}
+        o.update(props(source)); objects.append(o)
+    return data['width'],data['height'],tiles,objects
 
 @dataclass
 class Player:
-    x: float = 2.5
-    y: float = 8.5
-    hp: int = 100
-    energy: float = 100.0
-    facing: str = 'right'
+    x:float=3.5
+    y:float=23.5
+    hp:float=100.0
+    energy:float=100.0
+    facing:str='down'
+    walk_anim:float=0.0
 
+@dataclass
+class Drone:
+    x:float
+    y:float
+    base_x:float
+    base_y:float
+    target_x:float
+    target_y:float
+    vision:float=6.0
+    state:str='patrol'
+    stunned:float=0.0
+    last_seen_x:float=0.0
+    last_seen_y:float=0.0
+    timer:float=0.0
+    attack_cooldown:float=0.0
+    path_timer:float=0.0
+    patrol_backward:bool=False
+    path:list=field(default_factory=list)
 
 class World:
-    """Level 1: reveal the terminal, hack it, open the gate, activate the core."""
-
-    def __init__(self):
-        self.player = Player()
-        self.time = 0.0
-        self.points = 0
-        self.errors = 0
-        self.good_actions = 0
-        self.revealed = False
-        self.hacked = False
-        self.gate_open = False
-        self.core_active = False
-        self.cache_taken = False
-        self.status: Literal['playing', 'won', 'lost'] = 'playing'
-        self.shield_until = 0.0
-        self.pulse_until = 0.0
-        self.last_damage_time = -10.0
-        self.drone_x = 13.5
-        self.drone_y = 8.5
-        self.drone_dir = 1
-        self.nova_x = 1.8
-        self.nova_y = 8.8
-        self.hint = 'Найди терминал на левой стороне станции.'
-        self.message = 'НОВА: Слышишь меня? Надо восстановить связь!'
-        self.message_type = 'info'
-        self.messages = []
-        self._record(self.message, 'info')
-
-    def _record(self, message: str, kind: str = 'info'):
-        self.message = message
-        self.message_type = kind
-        self.messages.append((self.time, message, kind))
-        self.messages = self.messages[-8:]
-
-    def distance(self, pos) -> float:
-        return hypot(self.player.x-pos[0], self.player.y-pos[1])
-
-    def near(self, pos, limit: float = 1.7) -> bool:
-        return self.distance(pos) <= limit
-
-    def _free(self, x: float, y: float) -> bool:
-        radius = .27
-        for px in (x-radius, x+radius):
-            for py in (y-radius, y+radius):
-                cx, cy = int(px), int(py)
-                if cy < 0 or cy >= len(LEVEL) or cx < 0 or cx >= len(LEVEL[0]):
-                    return False
-                if LEVEL[cy][cx] == '#':
-                    return False
-                if not self.gate_open and (cx, cy) == (8, 5):
-                    return False
-        return True
-
-    @property
-    def difficulty(self) -> float:
-        """Rule-based adaptive challenge (not a second neural network)."""
-        if self.errors >= 4 or self.player.hp <= 35:
-            return .7
-        if self.good_actions >= 4 and self.errors <= 1:
-            return 1.2
-        return 1.0
-
-    @property
-    def laser_on(self) -> bool:
-        return (self.time * self.difficulty) % 3.3 < 1.7
-
-    @property
-    def shielded(self) -> bool:
-        return self.time < self.shield_until
-
-    @property
-    def drone_stunned(self) -> bool:
-        return self.time < self.pulse_until
-
-    def step(self, dt: float, dx: float = 0, dy: float = 0):
-        if self.status != 'playing':
-            return
-        dt = max(0.0, min(float(dt), .06))
-        self.time += dt
-        p = self.player
-        if dx or dy:
-            length = hypot(dx, dy)
-            dx, dy = dx/length, dy/length
-            if abs(dx) > abs(dy):
-                p.facing = 'right' if dx > 0 else 'left'
-            else:
-                p.facing = 'down' if dy > 0 else 'up'
-            step = 3.55 * dt
-            if self._free(p.x + dx*step, p.y):
-                p.x += dx*step
-            if self._free(p.x, p.y + dy*step):
-                p.y += dy*step
-
-        p.energy = min(100.0, p.energy + 2.3*dt)
-        # Floating friendly companion; purely visual, never blocks the player.
-        follow_x = max(1.5, p.x-.65)
-        follow_y = p.y+.45
-        self.nova_x += (follow_x-self.nova_x)*min(1.0, dt*2.8)
-        self.nova_y += (follow_y-self.nova_y)*min(1.0, dt*2.8)
-
-        # Drone patrol right of the security door.
-        if not self.drone_stunned:
-            self.drone_x += self.drone_dir * 1.15 * self.difficulty * dt
-            if self.drone_x >= 16.3:
-                self.drone_x, self.drone_dir = 16.3, -1
-            elif self.drone_x <= 11.4:
-                self.drone_x, self.drone_dir = 11.4, 1
-
-        if self.laser_on and self.near(LASER, .55):
-            self._damage(12, 'Лазерный барьер! -12 HP')
-        if self.near((self.drone_x, self.drone_y), .72) and not self.drone_stunned:
-            self._damage(18, 'Охранный дрон атакует! -18 HP')
-        if not self.cache_taken and self.near(CACHE, .55):
-            self.cache_taken = True
-            p.energy = min(100, p.energy+28)
-            self.points += 50
-            self._record('Найдена энергокапсула. +50 очков, заряд восстановлен.', 'success')
-        if self.core_active and self.near(EXIT, .61):
-            self.status = 'won'
-            self.points += max(0, 300-int(self.time*1.1))
-            self._record('Канал открыт. Ты спас станцию! Миссия завершена.', 'success')
-
-    def _damage(self, damage: int, text: str):
-        if self.time-self.last_damage_time < 1.6:
-            return
-        self.last_damage_time = self.time
-        if self.shielded:
-            self._record('Щит поглотил урон!', 'success')
-            return
-        self.player.hp = max(0, self.player.hp-damage)
-        self._record(text, 'error')
-        if self.player.hp == 0:
-            self.status = 'lost'
-            self._record('Критическое состояние. Соединение потеряно.', 'error')
-
-    def _fail(self, text: str):
-        self.errors += 1
-        self._record(text, 'error')
+    def __init__(self,level=1,abilities=None,stats=None,inventory=None,challenge=False):
+        self.level=level;self.challenge=challenge
+        try:self.story=json.loads((ROOT/'story'/'levels.json').read_text(encoding='utf-8'))[str(level)]
+        except (OSError,ValueError,KeyError):self.story={}
+        self.title=self.story.get('name',{1:'ПРОБУЖДЕНИЕ',2:'МЁРТВЫЙ СЕКТОР',3:'ПОСЛЕДНИЙ СИГНАЛ'}[level])
+        self.width,self.height,self.tiles,self.objects=load_map(level)
+        start=next(o for o in self.objects if o['type']=='spawn')
+        self.player=Player(start['x'],start['y'])
+        self.gate_positions={o['gate_id']:(int(o['x']),int(o['y'])) for o in self.objects if o['type']=='gate'}
+        self.abilities=set(abilities or ())
+        self.inventory={'medkit':1,'battery':1,'keycard':0,'lure':0}
+        self.inventory.update(inventory or {})
+        self.stats={'detections':0,'voice_success':0,'voice_errors':0,'errors':0,'actions_success':0,'commands':0,'items':0,'damage':0,'hints':0}
+        self.stats.update(stats or {})
+        self.time=0.0;self.score=0;self.alert=0.0;self.status='playing'
+        self.level_end='';self.ending='';self.shield_until=0.0;self.cam_disable_until=0.0
+        self.terminal_stage=0;self.core_stage=0;self.gates={'A':False,'B':False}
+        self.history=[];self.log=[];self.log_counter=0;self.camera_suspicion={}
+        self.last_damage=-10.0;self.last_detect=-10.0;self.last_hint=-10.0
+        self.lure_pos=None;self.lure_until=0.0
+        self.drones=[]
+        for o in self.objects:
+            if o['type']=='drone':
+                self.drones.append(Drone(o['x'],o['y'],o['x'],o['y'],float(o.get('target_x',o['x'])),float(o.get('target_y',o['y'])),float(o.get('range',6))))
+        self.message(self.story.get('dialog','НОВА: Я вижу маршрут к спасательной шлюпке, но часть моих модулей повреждена.'),'nova')
+    def message(self,text,kind='info'):
+        self.log_counter+=1
+        self.log.append((self.time,text,kind));self.log=self.log[-8:]
+    def nearby(self,typ=None,r=1.5):
+        opts=[o for o in self.objects if not o['taken'] and (typ is None or o['type']==typ) and distance((self.player.x,self.player.y),(o['x'],o['y']))<=r]
+        return min(opts,key=lambda z:distance((self.player.x,self.player.y),(z['x'],z['y']))) if opts else None
+    def collides(self,x,y,r=.22):
+        for ax in (x-r,x+r):
+            for ay in (y-r,y+r):
+                gx,gy=int(ax),int(ay)
+                if gx<0 or gx>=self.width or gy<0 or gy>=self.height:return True
+                if self.tiles[gy*self.width+gx] in (2,5):return True
+                for gate,pos in self.gate_positions.items():
+                    if not self.gates[gate] and (gx,gy)==pos:return True
         return False
-
-    def _success(self, text: str, score: int = 0):
-        self.good_actions += 1
-        self.points += score
-        self._record(text, 'success')
+    def ray_clear(self,ax,ay,bx,by):
+        d=math.hypot(bx-ax,by-ay)
+        steps=max(1,math.ceil(d*8))
+        for i in range(1,steps):
+            t=i/steps
+            if self.collides(ax+(bx-ax)*t,ay+(by-ay)*t,.04):return False
         return True
-
-    def command(self, name: str) -> bool:
-        """Process player intention; return True if action succeeded."""
-        if self.status != 'playing':
-            return False
-        if name == 'scan':
-            if self.near(TERMINAL):
-                if self.revealed:
-                    self._record('НОВА: панель уже обнаружена.', 'info')
-                    return True
-                self.revealed = True
-                return self._success('Сканирование завершено. Найдена скрытая панель!', 100)
-            return self._fail('Для сканирования подойди к терминалу (голубой экран).')
-        if name == 'hack':
-            if not self.near(TERMINAL):
-                return self._fail('Слишком далеко от терминала.')
-            if not self.revealed:
-                return self._fail('Сначала произнеси «Сканируй».')
-            if self.hacked:
-                self._record('Панель уже взломана.', 'info')
-                return True
-            self.hacked = True
-            return self._success('Взлом успешен! Замок шлюза разблокирован.', 150)
-        if name == 'open':
-            if self.near(GATE, 1.9):
-                if not self.hacked:
-                    return self._fail('Шлюз заблокирован. Сначала взломай терминал.')
-                if self.gate_open:
-                    self._record('Шлюз уже открыт.', 'info')
-                    return True
-                self.gate_open = True
-                return self._success('Шлюз открыт. Доберись до ядра станции!', 130)
-            if self.near(EXIT, 1.9):
-                if self.core_active:
-                    return self._success('Аварийный выход разблокирован. Иди к нему!', 30)
-                return self._fail('Аварийный выход заблокирован. Активируй ядро.')
-            return self._fail('Рядом нет дверей, которые можно открыть.')
-        if name == 'activate':
-            if not self.near(CORE, 2.0):
-                return self._fail('Для активации подойди к ядру в правом верхнем секторе.')
-            if not self.gate_open:
-                return self._fail('Доступ к ядру закрыт.')
-            if self.core_active:
-                self._record('Ядро уже активировано.', 'info')
-                return True
-            self.core_active = True
-            return self._success('Резервный канал восстановлен! Иди к выходу внизу справа.', 250)
-        if name == 'shield':
-            if self.player.energy < 25:
-                return self._fail('Недостаточно энергии для щита (нужно 25).')
-            if self.shielded:
-                self._record('Щит уже работает.', 'info')
-                return True
-            self.player.energy -= 25
-            self.shield_until = self.time+4.0
-            return self._success('Защитное поле включено на 4 секунды.')
-        if name == 'pulse':
-            if self.player.energy < 35:
-                return self._fail('Недостаточно энергии для импульса (нужно 35).')
-            if not self.near((self.drone_x, self.drone_y), 3.2):
-                return self._fail('Рядом нет дрона для импульсного удара.')
-            self.player.energy -= 35
-            self.pulse_until = self.time+5.0
-            return self._success('Электроимпульс! Дрон оглушён на 5 секунд.', 40)
-        if name == 'status':
-            self._record(f'НОВА: здоровье {self.player.hp}%, энергия {int(self.player.energy)}%, очки {self.points}.', 'info')
-            return True
-        if name == 'help':
-            if not self.revealed:
-                target = 'Ищи терминал на левой стороне. Подойди к нему и скажи «Сканируй».'
-            elif not self.hacked:
-                target = 'Теперь скажи «Взломай» рядом с терминалом.'
-            elif not self.gate_open:
-                target = 'Иди к зелёному шлюзу по центру и скажи «Открой».'
-            elif not self.core_active:
-                target = 'В правой части найди красное ядро и скажи «Активируй».'
+    def pathfind(self,start,goal):
+        sx,sy=int(start[0]),int(start[1]);gx,gy=int(goal[0]),int(goal[1]);q=deque([(sx,sy)])
+        seen={(sx,sy):None}
+        while q:
+            x,y=q.popleft()
+            if (x,y)==(gx,gy):break
+            for xx,yy in ((x+1,y),(x-1,y),(x,y+1),(x,y-1)):
+                if (xx,yy) not in seen and not self.collides(xx+.5,yy+.5,.05):
+                    seen[xx,yy]=(x,y);q.append((xx,yy))
+        if (gx,gy) not in seen:return []
+        cur=(gx,gy);result=[]
+        while cur!=(sx,sy):result.append((cur[0]+.5,cur[1]+.5));cur=seen[cur]
+        result.reverse();return result
+    @property
+    def difficulty(self):
+        if self.stats['detections']>=4 or self.stats['damage']>=75 or self.stats['errors']>=4 or self.player.hp<35:return .72
+        if self.time>45 and self.stats['detections']==0 and self.player.hp>75:return 1.18
+        return 1.0
+    @property
+    def shielded(self):return self.time<self.shield_until
+    @property
+    def alert_level(self):return 3 if self.alert>=80 else 2 if self.alert>=50 else 1 if self.alert>=18 else 0
+    @property
+    def mission(self):
+        if self.terminal_stage<4:
+            if 'scan' not in self.abilities:return 'Найди модуль сканирования.'
+            if 'hack' not in self.abilities:return 'Найди модуль взлома.'
+            if self.inventory['keycard']==0:return 'Найди карту доступа.'
+            return ['Подключись к главному терминалу.','Сканируй терминал.','Взломай защиту терминала.','Открой первый шлюз.'][self.terminal_stage]
+        if self.core_stage<4:
+            return ['Найди энергетическое ядро в центральном секторе.','Отключи нужное ядро согласно подсказке.','Активируй нужное ядро согласно подсказке.','Открой второй шлюз.'][self.core_stage]
+        return 'Доберись до спасательного перехода.' if self.level<3 else 'Доберись до шлюпки «Аврора».'
+    def damage(self,value,reason):
+        if self.time-self.last_damage<1.2:return
+        self.last_damage=self.time
+        if self.shielded:
+            self.message('НОВА: маскировочный щит поглотил удар.','success');return
+        value=round(value,1);self.player.hp=max(0,self.player.hp-value);self.stats['damage']+=value
+        self.message(f'{reason}  −{value:g} HP','danger')
+        if self.player.hp<=0:
+            self.status='lost';self.message('НОВА: критический отказ биопоказателей.','danger')
+    def fail(self,text):
+        self.stats['errors']+=1
+        if getattr(self,'_command_source','keyboard')=='voice':self.stats['voice_errors']+=1
+        self.alert=min(100,self.alert+7)
+        self.message('НОВА: '+text,'warning');return False
+    def success(self,text,points=50):
+        self.score+=points;self.stats['actions_success']+=1
+        if getattr(self,'_command_source','keyboard')=='voice':self.stats['voice_success']+=1
+        self.message('НОВА: '+text,'success');return True
+    def command(self,cmd,source='keyboard'):
+        if self.status!='playing':return False
+        self.stats['commands']+=1;self._command_source=source
+        if source=='voice':self.message('ГОЛОС: '+cmd,'voice')
+        near_main=self.nearby('main_terminal',1.8)
+        near_core=self.nearby('core',1.85)
+        if cmd in ('help','nova'):
+            self.stats['hints']+=1;self.message('НОВА: '+self.mission+' Рекомендация: исследуй боковые комнаты.','nova');return True
+        if cmd=='shield':
+            if 'shield' not in self.abilities:return self.fail('Модуль маскировки ещё не найден.')
+            if self.player.energy<29:return self.fail('Недостаточно энергии для щита (29).')
+            if self.shielded:return True
+            self.player.energy-=29;self.shield_until=self.time+7
+            return self.success('Маскировочное поле активировано на 7 секунд.',40)
+        if cmd=='pulse':
+            if 'pulse' not in self.abilities:return self.fail('Модуль импульса ещё не найден.')
+            if self.player.energy<36:return self.fail('Недостаточно энергии для импульса (36).')
+            self.player.energy-=36;affected=0
+            for drone in self.drones:
+                if distance((drone.x,drone.y),(self.player.x,self.player.y))<5.1:
+                    drone.stunned=self.time+5;drone.state='stunned';affected+=1
+            if affected:return self.success(f'Оглушено дронов: {affected}.',80*affected)
+            self.message('НОВА: Импульс активирован, поблизости нет целей.','info');return True
+        if cmd=='medkit':return self.use_item('medkit')
+        if cmd=='battery':return self.use_item('battery')
+        if cmd=='lure':return self.use_item('lure')
+        if cmd=='scan':
+            if 'scan' not in self.abilities:return self.fail('Сначала найди модуль сканирования.')
+            if near_main and self.terminal_stage==1:
+                self.terminal_stage=2;return self.success('Уязвимость терминала обнаружена.',85)
+            if near_core and self.core_stage==0:
+                self.core_stage=1
+                self.message('НОВА: '+self.clue,'nova');return self.success('Данные ядра изучены. Выбери два действия.',85)
+            return self.success('Сканирование: '+self.mission,5)
+        if cmd=='connect':
+            if near_main and self.terminal_stage==0:
+                self.terminal_stage=1;return self.success('Терминал подключён. Теперь сканируй.',70)
+            aux=self.nearby('aux_terminal',1.7)
+            if aux and 'hack' in self.abilities:
+                self.cam_disable_until=self.time+26;return self.success('Камеры сектора отключены на 26 секунд.',100)
+            if near_main and self.terminal_stage>0:return self.success('Соединение активно.',0)
+            return self.fail('Подойди к терминалу и повтори подключение.')
+        if cmd=='hack':
+            if 'hack' not in self.abilities:return self.fail('Нужен модуль взлома.')
+            if near_main and self.terminal_stage==2:
+                self.terminal_stage=3;return self.success('Шифрование терминала снято. Открой шлюз.',110)
+            if self.nearby('aux_terminal',1.7):
+                self.cam_disable_until=self.time+26;return self.success('Система камер временно отключена.',80)
+            return self.fail('Сначала: подключение → сканирование → взлом.')
+        if cmd=='open':
+            if near_main and self.terminal_stage==3:
+                if self.inventory['keycard']==0:return self.fail('Нужна карта персонала.')
+                self.gates['A']=True;self.terminal_stage=4;return self.success('Шлюз A открыт! Доступ к ядру разрешён.',190)
+            if near_core and self.core_stage==3:
+                if self.level==3 and 'control' not in self.abilities:return self.fail('Нужен модуль управления кораблём.')
+                self.gates['B']=True;self.core_stage=4;return self.success('Шлюз B открыт. Выход доступен.',210)
+            if near_main or near_core:return self.fail('Сначала выполни все действия на панели.')
+            return self.fail('Рядом нет готового к открытию шлюза.')
+        if cmd.startswith('off_') or cmd.startswith('on_'):
+            if not near_core:return self.fail('Необходимо подойти к энергетическому ядру.')
+            typ,color=cmd.split('_',1);off,on=SOLUTIONS[self.level]
+            if typ=='off' and self.core_stage==1:
+                if color!=off:return self.fail('Неверный контур! Проверь запись у ядра.')
+                self.core_stage=2;return self.success(f'{COLORS[color].capitalize()} ядро отключено.',100)
+            if typ=='on' and self.core_stage==2:
+                if color!=on:return self.fail('Неверный контур питания! Проверь подсказку.')
+                self.core_stage=3;return self.success(f'{COLORS[color].capitalize()} ядро активировано. Открой шлюз.',100)
+            return self.fail('Неверный порядок. Сначала сканируй → отключи → активируй.')
+        return self.fail('Команда не распознана игровыми системами.')
+    @property
+    def clue(self):
+        return self.story.get('clue',{1:'Красное питает турели, синее связь, жёлтое спасательные шлюзы. Отключи оборону и запитай выход.',2:'Синее создаёт помехи, красное стабилизирует вентиляцию, жёлтое резерв. Отключи помехи и запусти вентиляцию.',3:'Жёлтое удерживает ангар, синее управляет питанием, красное диагностика. Сними блокировку и запитай ангар.'}[self.level])
+    def use_item(self,kind):
+        if self.inventory.get(kind,0)<1:return self.fail('Такого предмета нет в инвентаре.')
+        if kind=='medkit':
+            if self.player.hp>=100:return False
+            self.inventory[kind]-=1;self.player.hp=min(100,self.player.hp+45);return self.success('Аптечка использована. +45 HP.',30)
+        if kind=='battery':
+            if self.player.energy>=100:return False
+            self.inventory[kind]-=1;self.player.energy=min(100,self.player.energy+60);return self.success('Энергия Новы восстановлена. +60.',30)
+        if kind=='lure':
+            self.inventory[kind]-=1;self.lure_pos=(self.player.x,self.player.y);self.lure_until=self.time+9
+            return self.success('Отвлекающий маяк запущен. Дроны проверяют сигнал.',55)
+        return False
+    def interact(self):
+        if self.status!='playing':return False
+        self._command_source='keyboard'
+        collectible_types={'module','medkit','battery','keycard','lure','note'}
+        o=self.nearby(r=1.3)
+        if o and o['type'] in collectible_types:
+            kind=o['type'];o['taken']=True;self.stats['items']+=1
+            if kind=='module':
+                ability=o['ability'];self.abilities.add(ability);self.score+=100
+                self.message('НОВА: МОДУЛЬ «'+{'scan':'СКАНЕР','hack':'ВЗЛОМ','shield':'МАСКИРОВКА','pulse':'ИМПУЛЬС','control':'УПРАВЛЕНИЕ','memory':'ПАМЯТЬ'}[ability]+'» УСТАНОВЛЕН.','success')
+            elif kind=='note':
+                self.score+=35;self.history.append(o.get('text','Архив повреждён.'));self.message('АРХИВ: '+o.get('text','Сведения недоступны.'),'nova')
             else:
-                target = 'Доберись до выхода в правом нижнем углу!'
-            self._record('НОВА: ' + target, 'info')
+                self.inventory[kind]=self.inventory.get(kind,0)+1;self.score+=30;self.message('НАЙДЕНО: '+o['name'],'success')
             return True
-        return self._fail('Неизвестная команда. Нажми H для списка команд.')
-
-    @property
-    def objective(self) -> str:
-        if not self.revealed:
-            return 'Найти терминал и СКАНИРОВАТЬ'
-        if not self.hacked:
-            return 'ВЗЛОМАТЬ обнаруженный терминал'
-        if not self.gate_open:
-            return 'ОТКРЫТЬ центральный шлюз'
-        if not self.core_active:
-            return 'АКТИВИРОВАТЬ ядро станции'
-        return 'Дойти до аварийного выхода'
-
-    @property
-    def progress(self) -> int:
-        return sum((self.revealed, self.hacked, self.gate_open, self.core_active))
+        obj=self.nearby(r=1.75)
+        if obj:
+            if obj['type']=='exit':
+                if self.core_stage<4:return self.fail('Выход заблокирован. Реши головоломку ядра.')
+                self.status='won';self.score+=max(100,500-int(self.time));self.level_end='escape'
+                self.message('НОВА: Путь свободен. Сектор пройден!','success');return True
+            if obj['type']=='main_terminal':self.message('ТЕРМИНАЛ: '+self.mission,'info');return True
+            if obj['type']=='core':self.message('ПОДСКАЗКА: '+self.clue,'nova');return True
+            if obj['type']=='broken_terminal':self.message('Разбитый терминал. Питание отключено. Это тупик.','warning');return True
+            if obj['type']=='aux_terminal':self.message('Вспомогательная сеть камер. Команда: «Подключение».','info');return True
+        self.message('НОВА: Здесь нет предметов для взаимодействия.','info');return False
+    def visible_to_sensor(self,x,y,angle,vision,fov):
+        if self.shielded:return False
+        ax,ay=self.player.x-x,self.player.y-y
+        d=math.hypot(ax,ay)
+        if d>vision:return False
+        direction=math.degrees(math.atan2(ay,ax))
+        delta=((direction-angle+180)%360)-180
+        return abs(delta)<=fov*.5 and self.ray_clear(x,y,self.player.x,self.player.y)
+    def _drone_step(self,d,dt):
+        if self.time<d.stunned:
+            d.state='stunned';return
+        if d.state=='stunned':
+            d.state='search';d.timer=2.2;d.last_seen_x=d.base_x;d.last_seen_y=d.base_y
+        d.attack_cooldown=max(0,d.attack_cooldown-dt)
+        detected=self.visible_to_sensor(d.x,d.y,math.degrees(math.atan2(self.player.y-d.y,self.player.x-d.x)),min(d.vision,3.7),360)
+        if detected:
+            if d.state!='chase' and self.time-self.last_detect>2.5:
+                self.stats['detections']+=1;self.last_detect=self.time;self.message('НОВА: Дрон обнаружил движение!','danger')
+            d.state='chase';d.timer=4.2;d.last_seen_x=self.player.x;d.last_seen_y=self.player.y;self.alert=clamp(self.alert+24*dt,0,100)
+        elif d.state in ('chase','search'):
+            d.timer-=dt
+            if d.timer<=0:d.state='patrol'
+            else:d.state='search'
+        if d.state=='patrol':
+            tx,ty=(d.base_x,d.base_y) if d.patrol_backward else (d.target_x,d.target_y)
+            if distance((d.x,d.y),(tx,ty))<.45:
+                d.patrol_backward=not d.patrol_backward
+                tx,ty=(d.base_x,d.base_y) if d.patrol_backward else (d.target_x,d.target_y)
+        elif d.state in ('chase','search'):
+            tx,ty=d.last_seen_x,d.last_seen_y
+        else:return
+        d.path_timer-=dt
+        if d.path_timer<=0:
+            d.path=self.pathfind((d.x,d.y),(tx,ty));d.path_timer=.65
+        if d.path:
+            while len(d.path)>1 and distance((d.x,d.y),d.path[0])<.3:d.path.pop(0)
+            tx,ty=d.path[0]
+        dx,dy=tx-d.x,ty-d.y;length=math.hypot(dx,dy)
+        if length>.04:
+            speed=(1.22 if d.state=='patrol' else 1.85)*self.difficulty*(1.18 if self.challenge else 1)
+            nx=d.x+dx/length*min(length,dt*speed);ny=d.y+dy/length*min(length,dt*speed)
+            if not self.collides(nx,d.y,.25):d.x=nx
+            if not self.collides(d.x,ny,.25):d.y=ny
+        if d.state=='chase' and distance((d.x,d.y),(self.player.x,self.player.y))<2.5 and d.attack_cooldown<=0:
+            d.attack_cooldown=2.0/self.difficulty;self.damage(14,'Импульс дрона')
+    def step(self,dt,dx=0,dy=0,run=False):
+        if self.status!='playing':return
+        dt=clamp(float(dt),0,.07);self.time+=dt
+        p=self.player
+        if dx or dy:
+            l=math.hypot(dx,dy);dx/=l;dy/=l
+            speed=(4.25 if run else 2.9)*dt
+            if not self.collides(p.x+dx*speed,p.y):p.x+=dx*speed
+            if not self.collides(p.x,p.y+dy*speed):p.y+=dy*speed
+            p.facing='right' if abs(dx)>abs(dy) and dx>0 else 'left' if abs(dx)>abs(dy) else 'down' if dy>0 else 'up'
+            p.walk_anim+=dt*(9 if run else 6)
+            if run and self.time-self.last_detect>2.5:
+                for drone in self.drones:
+                    if distance((drone.x,drone.y),(p.x,p.y))<2.8:
+                        drone.state='search';drone.timer=3;drone.last_seen_x=p.x;drone.last_seen_y=p.y
+        p.energy=min(100,p.energy+1.4*dt)
+        self.alert=max(0,self.alert-3.1*dt)
+        for o in self.objects:
+            if o['type']!='camera' or self.time<self.cam_disable_until:continue
+            angle=float(o.get('angle',0))+math.sin(self.time*.85+o['x'])*float(o.get('sweep',50))
+            if self.visible_to_sensor(o['x'],o['y'],angle,float(o.get('range',7)),64):
+                before=self.camera_suspicion.get(o['id'],0)
+                self.camera_suspicion[o['id']]=min(1.5,before+dt*.82*self.difficulty)
+                if before<1<=self.camera_suspicion[o['id']]:
+                    self.stats['detections']+=1;self.message('ТРЕВОГА: камера навела турели!','danger')
+                if self.camera_suspicion[o['id']]>=1:self.alert=min(100,self.alert+33*dt)
+            else:self.camera_suspicion[o['id']]=max(0,self.camera_suspicion.get(o['id'],0)-dt*.8)
+        for d in self.drones:
+            if self.lure_pos is not None and self.time<self.lure_until and distance((d.x,d.y),self.lure_pos)<9 and d.state not in ('chase','stunned'):
+                d.state='search';d.timer=2.8;d.last_seen_x,d.last_seen_y=self.lure_pos
+            self._drone_step(d,dt)
+        for o in self.objects:
+            if o['type']=='turret' and self.alert>=47 and self.time-self.last_damage>1.2:
+                if distance((o['x'],o['y']),(p.x,p.y))<=float(o.get('range',7)) and self.ray_clear(o['x'],o['y'],p.x,p.y):
+                    self.damage(12,'Выстрел турели')
+        if self.challenge and self.alert<20:self.alert+=dt*.25
+    def snapshot(self):
+        return {'level':self.level,'abilities':sorted(self.abilities),'inventory':self.inventory,'stats':self.stats,'score':self.score,'time':round(self.time,2),'health':round(self.player.hp),'challenge':self.challenge}

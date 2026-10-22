@@ -1,55 +1,37 @@
-"""Small, auditable command interpreter shared by speech and keyboard controls.
-
-Speech-to-text is performed by the real Vosk model in voice.py. This module
-only converts its Russian text output into a finite set of game intentions.
-"""
+"""Restricted Russian speech vocabulary -> game intentions. Vosk is real ML in voice.py."""
 import re
-
-COMMANDS = (
-    ('scan', 'Сканируй', '1'),
-    ('hack', 'Взломай', '2'),
-    ('open', 'Открой', '3'),
-    ('shield', 'Щит', '4'),
-    ('activate', 'Активируй', '5'),
-    ('help', 'Помощь', '6'),
-    ('status', 'Статус', '7'),
-    ('pulse', 'Импульс', '8'),
-)
-
-PHRASES = {
-    'scan': ('сканируй', 'сканировать', 'просканируй', 'сканирование', 'осмотри', 'найди панель'),
-    'hack': ('взломай', 'взломать', 'взлом', 'хакни'),
-    'open': ('открой', 'открыть', 'открывай', 'открой дверь'),
-    'shield': ('щит', 'защита', 'защити', 'включи защиту'),
-    'activate': ('активируй', 'активация', 'активировать', 'запусти ядро'),
-    'help': ('помощь', 'помоги', 'подсказка', 'что делать'),
-    'status': ('статус', 'состояние', 'отчет', 'отчёт'),
-    'pulse': ('импульс', 'оглуши', 'электроимпульс'),
+ACTIONS=[
+ ('scan','Сканируй','1'),('connect','Подключение','2'),('hack','Взломай','3'),('open','Открой','4'),
+ ('shield','Щит','5'),('pulse','Импульс','6'),('help','Нова / помощь','7'),
+ ('off_red','Отключи красное','8'),('on_yellow','Активируй жёлтое','9'),
+ ('off_blue','Отключи синее','0'),('on_red','Активируй красное','-'),
+ ('off_yellow','Отключи жёлтое','='),('on_blue','Активируй синее','Backspace')]
+ALIASES={
+ 'scan':['сканируй','сканирование','просканируй','сканировать'],
+ 'connect':['подключение','подключись','подключи терминал','соединись'],
+ 'hack':['взломай','взлом','взломать'],
+ 'open':['открой','открыть шлюз','открой дверь','открой шлюз'],
+ 'shield':['щит','маскировка','активируй щит','скрой меня'],
+ 'pulse':['импульс','оглуши дрона','электромагнитный импульс'],
+ 'help':['нова','помощь','подскажи','что делать'],
+ 'medkit':['аптечка','используй аптечку'],
+ 'battery':['батарея','восстанови энергию'],
+ 'lure':['маяк','отвлеки дрона'],
 }
+for color,adjs in {'red':['красное','красный'],'blue':['синее','синий'],'yellow':['желтое','желтый','жёлтое','жёлтый']}.items():
+    for action,verbs in {'off':['отключи','выключи','деактивируй'],'on':['активируй','включи','запусти']}.items():
+        ALIASES[f'{action}_{color}']=[f'{v} {a}' for v in verbs for a in adjs]
 
+def clean(text):
+    return re.sub(r'\s+',' ',re.sub(r'[^a-zа-я\s]',' ',str(text).lower().replace('ё','е'))).strip()
 
-def clean_text(text: str) -> str:
-    text = str(text).lower().replace('ё', 'е')
-    return re.sub(r'\s+', ' ', re.sub(r'[^a-zа-я\s]', ' ', text)).strip()
-
-
-def interpret(text: str) -> str | None:
-    """Find known commands inside natural phrases. None means unrecognised."""
-    cleaned = f' {clean_text(text)} '
-    if not cleaned.strip():
-        return None
-    # Longer phrases first so short words cannot incorrectly pre-empt a phrase.
-    possibilities = sorted(
-        ((clean_text(phrase), command) for command, aliases in PHRASES.items() for phrase in aliases),
-        key=lambda item: -len(item[0]),
-    )
-    for phrase, command in possibilities:
-        if f' {phrase} ' in cleaned:
-            return command
+def interpret(text):
+    text=' '+clean(text)+' '
+    if not text.strip():return None
+    possibilities=sorted(((clean(p),name) for name,phrases in ALIASES.items() for p in phrases),key=lambda item:-len(item[0]))
+    for phrase,name in possibilities:
+        if ' '+phrase+' ' in text:return name
     return None
 
-
-def vocabulary() -> list[str]:
-    """Restricted Vosk grammar reduces irrelevant transcripts/noise."""
-    phrases = [phrase for aliases in PHRASES.values() for phrase in aliases]
-    return sorted(set(phrases)) + ['[unk]']
+def vocabulary():
+    return sorted(set(p for phrases in ALIASES.values() for p in phrases))+['[unk]']

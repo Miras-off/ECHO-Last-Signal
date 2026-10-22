@@ -1,1 +1,1 @@
-"""ECHO: Последний сигнал — 2D top-down voice quest."""
+"""ECHO: Последний сигнал - original 2D stealth voice adventure."""

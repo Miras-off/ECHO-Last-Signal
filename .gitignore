@@ -2,7 +2,8 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
-models/vosk-model-small-ru-0.22/
+models/vosk-model-*/
 models/*.zip
-save/*.db
-.idea/
+save_data/*.sqlite3
+crash_log.txt
+.DS_Store

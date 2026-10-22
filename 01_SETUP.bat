@@ -1,27 +1,28 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-echo ==========================================
-echo   ECHO - setup Python environment
- echo ==========================================
+title ECHO - установка игры
+set "PYEXE="
 if not exist ".venv\Scripts\python.exe" (
-    py -3.12 -m venv .venv 2>nul
-    if not exist ".venv\Scripts\python.exe" py -3.11 -m venv .venv 2>nul
-    if not exist ".venv\Scripts\python.exe" py -3 -m venv .venv 2>nul
-    if not exist ".venv\Scripts\python.exe" python -m venv .venv
+  py -3.12 -m venv .venv 2>nul
+  if not exist ".venv\Scripts\python.exe" py -3.11 -m venv .venv 2>nul
+  if not exist ".venv\Scripts\python.exe" py -3 -m venv .venv 2>nul
+  if not exist ".venv\Scripts\python.exe" python -m venv .venv 2>nul
 )
 if not exist ".venv\Scripts\python.exe" (
-    echo Could not create venv. Install Python 3.11 or 3.12 from python.org
-    pause
-    exit /b 1
+  echo Не удалось создать среду. Установи Python 3.11 или 3.12.
+  pause
+  exit /b 1
 )
-".venv\Scripts\python.exe" -m pip install --upgrade pip
-".venv\Scripts\python.exe" -m pip install -r requirements.txt
+set "PYEXE=.venv\Scripts\python.exe"
+echo Устанавливаю Pygame-ce...
+"%PYEXE%" -m pip install -r requirements-game.txt
 if errorlevel 1 (
-    echo Packages installation failed. Check Internet and Python version.
-    pause
-    exit /b 1
+  echo Ошибка установки. Проверь интернет и версию Python.
+  pause
+  exit /b 1
 )
 echo.
-echo SETUP OK. Run 02_RUN.bat. For voice: 03_DOWNLOAD_VOICE_MODEL.bat.
+echo Игра установлена. Запуск: 02_RUN.bat
+ echo Для голосового управления выполни 03_DOWNLOAD_VOICE_MODEL.bat
 pause

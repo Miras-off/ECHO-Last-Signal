@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><defs>
+    <linearGradient id="steel" x1="0" x2="1" y1="0" y2="1"><stop stop-color="#a4d6df"/><stop offset=".45" stop-color="#435f78"/><stop offset="1" stop-color="#13283f"/></linearGradient>
+    <linearGradient id="floor" x1="0" x2="1" y1="0" y2="1"><stop stop-color="#243a50"/><stop offset="1" stop-color="#111f31"/></linearGradient>
+    <linearGradient id="wall" x1="0" x2="0" y1="0" y2="1"><stop stop-color="#658097"/><stop offset=".28" stop-color="#293e54"/><stop offset="1" stop-color="#101c2f"/></linearGradient>
+    <radialGradient id="glow"><stop stop-color="#a8ffff" stop-opacity=".9"/><stop offset="1" stop-color="#28a8d0" stop-opacity="0"/></radialGradient>
+    </defs><rect x="6" y="4" width="52" height="56" rx="15" fill="url(#steel)" stroke="#83d9db" stroke-width="3"/><rect x="13" y="11" width="38" height="42" rx="9" fill="#12273b" stroke="#b2f1e5" stroke-width="2"/><path d="M17 31h29M32 20l13 11-13 11" fill="none" stroke="#6effc5" stroke-width="5"/></svg>

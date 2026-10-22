@@ -1,0 +1,22 @@
+ECHO: ПОСЛЕДНИЙ СИГНАЛ — ПЕРВЫЙ ЗАПУСК
+
+Windows:
+1. Установи Python 3.11/3.12 (python.org).
+2. Дважды щёлкни 01_SETUP.bat. Подожди установки Pygame-ce.
+3. Дважды щёлкни 02_RUN.bat. Игра откроется без Vosk.
+4. Чтобы использовать НАСТОЯЩИЕ голосовые команды: 03_DOWNLOAD_VOICE_MODEL.bat,
+   затем снова 02_RUN.bat и клавиша V в игре.
+
+Управление: WASD, E, Tab (панель команд), V (микрофон), M (карта),
+1-0, -, =, Backspace (команды без микрофона), H/B/G (инвентарь).
+
+ДЛЯ РЕДАКТИРОВАНИЯ:
+  Карты — maps/level_1.tmj ... level_3.tmj (программа Tiled).
+  Персонажи/графика — assets/source_svg/ (программа Inkscape).
+  Звуки — assets/audio/ (программа Audacity).
+  История — story/levels.json (VS Code/Блокнот).
+  Палитра — assets/ui/theme.json.
+  Инструкция — docs/EDITING_GUIDE.md.
+
+04_TEST.bat — проверка исходной логики и связности уровней.
+Состояние реальной проверки графики/микрофона — docs/TEST_STATUS.md.
