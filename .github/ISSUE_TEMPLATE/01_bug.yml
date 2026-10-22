@@ -1,5 +1,5 @@
 name: Bug report
-about: Report a reproducible problem in ECHO
+description: Report a reproducible problem in ECHO
 labels: [bug]
 body:
   - type: textarea

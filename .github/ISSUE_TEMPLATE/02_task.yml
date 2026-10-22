@@ -1,5 +1,5 @@
 name: Project task
-about: Track a real implementation, testing, or documentation task
+description: Track a real implementation, testing, or documentation task
 body:
   - type: input
     id: title
