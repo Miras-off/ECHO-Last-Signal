@@ -1,7 +1,7 @@
 """Pygame UI, drawing and input. Data/art not hardcoded: see maps/*.tmj and assets/.
 Game logic (AI, sensor geometry, objectives) lives in world.py for headless tests.
 """
-import math, sys
+import math, sys, time
 from pathlib import Path
 import pygame
 from .world import World,ROOT,distance,COLORS,SOLUTIONS
@@ -49,6 +49,7 @@ class Game:
         self.mode='menu';self.world=None
         self.storage=Storage();self.voice=VoiceListener()
         self.wallet_cache=self.storage.wallet()
+        self.last_wallet_refresh=time.monotonic()
         self.loss_accounted=False
         self.payment_product=None;self.payment_origin='store';self.payment_receipt=None
         self.assets={};self.cover=None;self.tiles=None
@@ -197,6 +198,19 @@ class Game:
             if flip:frame=pygame.transform.flip(frame,True,False)
             self.image_cache[key]=frame
         self.window.blit(frame,(int(cx-width/2),int(cy-height/2)))
+    @staticmethod
+    def countdown(seconds):
+        """Human-readable time until one free life. None means timer inactive."""
+        if seconds is None:return None
+        seconds=max(0,int(seconds))
+        return f'{seconds//60:02d}:{seconds%60:02d}'
+
+    def regeneration_label(self,status):
+        if status['unlimited']:return 'PREMIUM: БЕЗЛИМИТНЫЕ ПОПЫТКИ'
+        remaining=self.countdown(status['next_life_in'])
+        if remaining is None:return 'БЕСПЛАТНЫЕ ЖИЗНИ ВОССТАНОВЛЕНЫ'
+        return f'БЕСПЛАТНО +1 ЖИЗНЬ ЧЕРЕЗ {remaining}'
+
     def start(self,resume=False,challenge=False):
         if not self.storage.can_play():
             self.mode='locked'
@@ -318,6 +332,11 @@ class Game:
             elif tag=='heard' and self.world:self.world.message('РАСПОЗНАНО: '+payload,'voice')
     def tick(self,dt):
         self.read_voice()
+        # A slow refresh keeps the in-game HUD in sync without querying SQLite
+        # every frame. Menus use recovery_status() directly for live countdowns.
+        if time.monotonic()-getattr(self,'last_wallet_refresh',0)>=1:
+            self.wallet_cache=self.storage.wallet()
+            self.last_wallet_refresh=time.monotonic()
         if self.mode!='play' or not self.world:
             self.audio.update(dt,self.mode,self.world)
             return
@@ -419,18 +438,23 @@ class Game:
         pygame.draw.rect(self.window,(7,21,35),(29,266,525,444),border_radius=16)
         self.rect((42,285,500,417),'panel','border',14)
         self.text('АТЛАС-9  /  ЭВАКУАЦИЯ',77,309,17,'accent',True)
-        wallet=self.storage.wallet()
-        life_text='ЖИЗНИ: БЕЗЛИМИТ' if wallet['unlimited'] else f'ЖИЗНИ: {wallet["lives"]}  /  3'
-        self.text(life_text,77,430,17,'good' if self.storage.can_play() else 'bad',True)
+        wallet=self.storage.recovery_status()
+        if wallet['unlimited']:
+            life_text='ЖИЗНИ: БЕЗЛИМИТ'
+        else:
+            life_text=f'ЖИЗНИ: {wallet["lives"]}'
+            if wallet['next_life_in'] is not None:
+                life_text+=f'  •  +1 БЕСПЛАТНО: {self.countdown(wallet["next_life_in"])}'
+        self.text(life_text,77,430,15,'good' if wallet['lives']>0 or wallet['unlimited'] else 'gold',True)
         self.paragraph('Ты очнулся на заброшенном военном корабле. Восстанови Нову, избегай охраны и найди спасательную шлюпку.',77,353,425,20,28,'text')
-        self.button('НОВАЯ ИГРА' if self.storage.can_play() else 'НУЖНО КУПИТЬ ЖИЗНИ',(73,454,432,51),lambda:self.start(),True)
+        self.button('НОВАЯ ИГРА' if self.storage.can_play() else 'ВОССТАНОВЛЕНИЕ / МАГАЗИН',(73,454,432,51),lambda:self.start(),True)
         self.button('ПРОДОЛЖИТЬ',(73,514,210,48),lambda:self.start(resume=True),disabled=self.storage.load() is None or not self.storage.can_play(),small=True)
         self.button('КАК ИГРАТЬ',(296,514,209,48),lambda:self.set_mode('help'),small=True)
         self.button('РЕКОРДЫ',(73,574,210,48),lambda:self.set_mode('records'),small=True)
         self.button('НАСТРОЙКИ',(296,574,209,48),lambda:self.set_mode('settings'),small=True)
         self.button('МАГАЗИН / PREMIUM',(73,634,210,44),lambda:self.set_mode('store'),small=True)
         self.button('ВЫХОД',(296,634,209,44),lambda:setattr(self,'running',False),small=True)
-        self.text('v2.1.2 • MONETIZATION DEMO / NO REAL PAYMENTS',23,746,14,'muted')
+        self.text('v2.1.3 • FREE LIFE EVERY 15 MIN / DEMO PAYMENTS',23,746,14,'muted')
     def set_mode(self,value):
         if value=='settings':self.settings_return_mode='pause' if self.mode=='pause' else 'menu'
         self.mode=value
@@ -957,7 +981,7 @@ class Game:
             'Камеры вызывают турели. Дроны преследуют и атакуют. Прячься за стенами.',
             'Щит скрывает от сканеров 7 секунд; импульс оглушает ближайших дронов на 5 секунд.',
             'Логические терминалы: E — открыть, 1–3 — выбрать ответ. Для шлюзов A/B нужны задания.',
-            'После трёх поражений попытки заканчиваются. В магазине — только демо-покупка жизней или Premium без реальных платежей.',
+            'После потери жизни восстановление +1 бесплатно каждые 15 минут (до 3). В магазине — демо-покупки и Premium.',
             'Редактирование: карты — Tiled (*.tmj), персонажи — Inkscape (*.svg), сценарии — JSON.'
         ]
         y=229
@@ -1049,20 +1073,37 @@ class Game:
         else:self.mode='store'
 
     def locked(self):
-        self.panel_base('ПОПЫТКИ ЗАКОНЧИЛИСЬ','Три поражения исчерпали запас жизней • восстановление только в магазине')
+        status=self.storage.recovery_status()
+        available=status['unlimited'] or status['lives']>0
+        title='ЖИЗНЬ ВОССТАНОВЛЕНА' if available else 'ПОПЫТКИ ЗАКОНЧИЛИСЬ'
+        self.panel_base(title,'Бесплатно: +1 жизнь каждые 15 минут (максимум 3) • таймер работает офлайн')
         self.rect((W//2-410,254,820,409),'panel','border',16)
-        self.text('ДОСТУП К ИГРЕ ЗАБЛОКИРОВАН',W//2,291,26,'bad',True,center=True)
-        self.paragraph('Попытки сохраняются в SQLite даже после перезапуска игры. Бесплатного восстановления нет. Это учебный магазин: деньги не списываются.',W//2-345,345,690,19,29,'text',4)
-        self.button('КУПИТЬ 3 ЖИЗНИ  •  490 ₸',(W//2-320,454,640,56),lambda:self.begin_payment('lives_3','locked'),True)
-        self.button('PREMIUM: БЕЗЛИМИТ  •  1 490 ₸',(W//2-320,527,640,54),lambda:self.begin_payment('premium_pass','locked'))
+        self.text('МОЖНО ПРОДОЛЖАТЬ!' if available else 'ДОСТУП ВРЕМЕННО ЗАБЛОКИРОВАН',
+                  W//2,291,25,'good' if available else 'bad',True,center=True)
+        self.paragraph('Жизни сохраняются в SQLite. Можно подождать бесплатного восстановления или сразу воспользоваться демо-магазином без реальных платежей.',
+                       W//2-345,345,690,18,27,'text',3)
+        if status['unlimited']:
+            timer='PREMIUM: БЕЗЛИМИТНЫЕ ПОПЫТКИ'
+        elif available:
+            timer=f'ВОССТАНОВЛЕНО • ДОСТУПНО ЖИЗНЕЙ: {status["lives"]}'
+        else:
+            timer=self.regeneration_label(status)
+        self.text(timer,W//2,427,19,'good' if available else 'gold',True,center=True)
+        self.button('КУПИТЬ 3 ЖИЗНИ  •  490 ₸',(W//2-320,465,640,51),lambda:self.begin_payment('lives_3','locked'),True)
+        self.button('PREMIUM: БЕЗЛИМИТ  •  1 490 ₸',(W//2-320,530,640,50),lambda:self.begin_payment('premium_pass','locked'))
+        if available:
+            self.button('ПРОДОЛЖИТЬ ИГРУ',(W//2-235,602,470,46),lambda:self.set_mode('menu'),True)
+        else:
+            self.text('МОЖНО ЗАКРЫТЬ ИГРУ: ОТСЧЁТ ПРОДОЛЖИТСЯ',W//2,616,14,'muted',True,center=True)
         self.button('ГЛАВНОЕ МЕНЮ',(W//2-180,686,360,48),lambda:self.set_mode('menu'))
 
     def store(self):
         self.panel_base('МАГАЗИН / PREMIUM','Учебный прототип коммерциализации • покупки и цены только демонстрационные')
         self.rect((W//2-435,228,870,455),'panel','border',16)
-        wallet=self.storage.wallet()
+        wallet=self.storage.recovery_status()
         lives='БЕЗЛИМИТ' if wallet['unlimited'] else str(wallet['lives'])
-        self.text(f'ДОСТУПНО ЖИЗНЕЙ: {lives}',W//2,251,24,'good' if self.storage.can_play() else 'bad',True,center=True)
+        self.text(f'ДОСТУПНО ЖИЗНЕЙ: {lives}',W//2,247,23,'good' if wallet['unlimited'] or wallet['lives'] else 'bad',True,center=True)
+        self.text(self.regeneration_label(wallet),W//2,283,15,'gold' if wallet['next_life_in'] is not None else 'muted',True,center=True)
         self.rect((W//2-390,310,780,115),'panel_alt','border',10)
         self.text('НАБОР: +3 ЖИЗНИ',W//2-365,321,23,'text',True)
         self.text('Без срока действия • сохраняется при перезапуске',W//2-365,358,16,'muted')
@@ -1118,9 +1159,11 @@ class Game:
         lines=[f'Очки сектора: {w.score}',f'Время: {int(w.time)//60:02d}:{int(w.time)%60:02d}',f'Обнаружения: {w.stats["detections"]}',f'Ошибки команд: {w.stats["errors"]}',f'Собранные предметы: {w.stats["items"]}']
         for i,line in enumerate(lines):self.text(line,W//2-245,288+i*43,22,'text')
         if not won:
-            wallet=self.storage.wallet()
+            wallet=self.storage.recovery_status()
             count='БЕЗЛИМИТ' if wallet['unlimited'] else str(wallet['lives'])
-            self.text('ОСТАЛОСЬ ЖИЗНЕЙ: '+count,W//2,527,19,'good' if self.storage.can_play() else 'bad',True,center=True)
+            self.text('ОСТАЛОСЬ ЖИЗНЕЙ: '+count,W//2,523,19,'good' if self.storage.can_play() else 'bad',True,center=True)
+            if wallet['next_life_in'] is not None:
+                self.text(self.regeneration_label(wallet),W//2,550,13,'gold',True,center=True)
         if won or self.storage.can_play():
             self.button('ДАЛЬШЕ' if won else 'ПОВТОРИТЬ УРОВЕНЬ',(W//2-245,572,490,58),lambda:self.result_next(),True)
         else:
