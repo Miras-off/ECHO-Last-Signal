@@ -13,10 +13,10 @@ PRIORITY={
     'turret_target':5,'turret_fire':9,'drone_attack':9,'player_hit':8,
     'puzzle_ok':7,'puzzle_error':7,'fail':7,'victory':10,
     'pulse_blast':9,'shield_on':7,'door':8,'power_down':7,'power_up':7,
-    'ui_click':2,'ui_back':2,'ui_hover':1,'pickup':4,'keycard':5,
+    'ui_click':2,'ui_back':2,'pickup':4,'keycard':5,
 }
 COOLDOWNS={
-    'ui_click':.055,'ui_back':.06,'ui_hover':.13,
+    'ui_click':.055,'ui_back':.06,
     'camera_warning':1.65,'camera_lock':2.1,'drone_alert':2.35,
     'drone_search':2.0,'security_alarm':6.0,'turret_target':.45,
     'turret_fire':.22,'drone_attack':.25,'player_hit':.3,

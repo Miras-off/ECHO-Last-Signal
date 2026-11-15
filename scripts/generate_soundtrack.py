@@ -103,10 +103,6 @@ pulse_fx('lure',.63,340,710,'metal',noise=.06,base=.52,tail=.29)
 pulse_fx('door',1.75,120,52,'metal',noise=.80,base=.67,tail=.65,attack=.025)
 pulse_fx('fail',1.45,260,90,'metal',noise=.14,base=.57,tail=.84)
 multichime('victory',[261.63,329.63,392,523.25,659.25],2.8,.61)
-# Old names kept as compatibility with any scripts or legacy calls.
-for name,canonical in {'click':'ui_click','damage':'player_hit','alarm':'security_alarm','drone':'drone_alert','pulse':'pulse_blast'}.items():
-    (OUT/(name+'.wav')).write_bytes((OUT/(canonical+'.wav')).read_bytes())
-
 # Looped soundscape: three level themes, menu, suspense, chase and ventilation.
 SECONDS=16.0;N=int(SR*SECONDS);time=np.arange(N)/SR
 
@@ -205,6 +201,4 @@ vent=base*breath*.030
 vent+=filter_noise(N,2100,high=True)*.0028
 vent=vent.astype('float32')
 to_ogg('ambience_ship',vent,np.roll(vent,int(SR*.07))*.93)
-# Restore old filename for scripts that reference it, but new game does not loop it.
-sf.write(OUT/'ambient.wav',np.column_stack((vent,vent*.92)),SR,subtype='PCM_16')
 print('Generated',len(list(OUT.glob('*.wav'))),'WAV and',len(list(OUT.glob('*.ogg'))),'OGG originals in',OUT)
